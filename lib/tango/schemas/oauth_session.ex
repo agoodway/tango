@@ -66,6 +66,8 @@ defmodule Tango.Schemas.OAuthSession do
       session_token: session_token,
       state: state,
       code_verifier: code_verifier,
+      redirect_uri: opts[:redirect_uri],
+      scopes: opts[:scopes] || [],
       expires_at: expires_at,
       metadata: build_session_metadata(opts)
     }

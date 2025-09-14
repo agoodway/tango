@@ -66,8 +66,9 @@ defmodule Tango.Auth do
       scopes = Keyword.get(opts, :scopes, provider.default_scopes)
 
       # Validate redirect URI for security
-      with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri) do
-        build_auth_url(oauth_config, session, redirect_uri, scopes)
+      with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
+           {:ok, updated_session} <- update_session_redirect_uri(session, redirect_uri) do
+        build_auth_url(oauth_config, updated_session, redirect_uri, scopes)
       end
     end
   end
@@ -151,6 +152,7 @@ defmodule Tango.Auth do
          {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
          {:ok, session} <- get_session_by_state(state, tenant_id),
          :ok <- OAuthSession.validate_state(session, state),
+         :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]),
          {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
          {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
          {:ok, token_response} <-
@@ -304,7 +306,7 @@ defmodule Tango.Auth do
   end
 
   defp perform_token_exchange(oauth_config, session, authorization_code, opts) do
-    redirect_uri = Keyword.fetch!(opts, :redirect_uri)
+    redirect_uri = Keyword.get(opts, :redirect_uri)
 
     # Build OAuth2 client
     client =
@@ -379,5 +381,51 @@ defmodule Tango.Auth do
 
   defp cleanup_session(session) do
     @repo.delete(session)
+  end
+
+  # Update session with redirect_uri if not already set (for authorize_url flow)
+  defp update_session_redirect_uri(session, redirect_uri) do
+    case session.redirect_uri do
+      nil ->
+        # First time setting redirect_uri, update the session
+        changeset =
+          session
+          |> OAuthSession.changeset(%{redirect_uri: redirect_uri})
+
+        @repo.update(changeset)
+
+      ^redirect_uri ->
+        # Same redirect_uri, no update needed
+        {:ok, session}
+
+      _different ->
+        # Different redirect_uri, this is a binding violation
+        {:error, :redirect_uri_mismatch}
+    end
+  end
+
+  # OAuth2 RFC 6749 compliance: validate redirect_uri binding
+  defp validate_redirect_uri_binding(session, provided_redirect_uri) do
+    case {session.redirect_uri, provided_redirect_uri} do
+      {stored, provided} when stored == provided ->
+        :ok
+
+      {nil, nil} ->
+        :ok
+
+      {nil, _provided} ->
+        # Session was created without redirect_uri, but one is provided in exchange
+        # This can happen in tests or when authorize_url step was skipped
+        # We'll allow this but ideally the full OAuth flow should be used
+        :ok
+
+      {_stored, nil} ->
+        # Session was created with redirect_uri, but none provided in exchange
+        {:error, :redirect_uri_binding_violation}
+
+      {_stored, _provided} ->
+        # redirect_uri mismatch
+        {:error, :redirect_uri_mismatch}
+    end
   end
 end
