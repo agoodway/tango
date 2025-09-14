@@ -1,6 +1,6 @@
-# 💃 Tango - OAuth Integration Library
+# 💃 Tango - OAuth Integrations Library
 
-*Tango handles the OAuth dance for third-party integrations.*
+> Tango handles the OAuth dance between third-party services and your Phoenix application.
 
 **Tango** is an Elixir OAuth integration library for Phoenix applications that provides drop-in OAuth support for third-party integrations. Inspired by [Nango](https://github.com/NangoHQ/nango) (previously [Pizzly](https://dev.to/bearer/introducing-pizzly-an-open-sourced-free-fast-simple-api-integrations-manager-4jog)) and compatible with Nango's provider configuration format, Tango leverages the extensive Nango provider catalog while providing a library-first approach for Phoenix applications.
 
@@ -172,10 +172,6 @@ headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 # Mark connection as used (updates last_used_at)
 Tango.mark_connection_used(connection)
 ```
-
-## LiveView
-
-### TODO
 
 ## API Routes for External Clients
 
