@@ -83,7 +83,7 @@ defmodule Tango.Schemas.Connection do
       token_type: normalize_token_type_value(token_response["token_type"]),
       expires_at: calculate_expiration(token_response["expires_in"]),
       granted_scopes: parse_scopes(token_response["scope"]),
-      raw_payload: token_response,
+      raw_payload: sanitize_raw_payload(token_response),
       status: :active,
       last_used_at: DateTime.utc_now()
     }
@@ -99,7 +99,7 @@ defmodule Tango.Schemas.Connection do
       refresh_token: token_response["refresh_token"] || connection.refresh_token,
       expires_at: calculate_expiration(token_response["expires_in"]),
       granted_scopes: parse_scopes(token_response["scope"]),
-      raw_payload: Map.merge(connection.raw_payload || %{}, token_response),
+      raw_payload: Map.merge(connection.raw_payload || %{}, sanitize_raw_payload(token_response)),
       refresh_attempts: 0,
       last_refresh_failure: nil,
       refresh_exhausted: false,
@@ -144,6 +144,24 @@ defmodule Tango.Schemas.Connection do
 
   def can_refresh?(%__MODULE__{}), do: false
 
+  @doc "Extracts the raw access token string for API usage"
+  def get_raw_access_token(%__MODULE__{access_token: nil}), do: nil
+
+  def get_raw_access_token(%__MODULE__{access_token: encrypted_token})
+      when is_binary(encrypted_token) do
+    # The access_token field is automatically decrypted by EncryptedBinary type
+    # when loaded from the database, so we can return it directly
+    encrypted_token
+  end
+
+  def get_raw_access_token(%__MODULE__{access_token: token}) do
+    # Handle any other token format (should be rare)
+    case token do
+      token when is_binary(token) -> token
+      _ -> nil
+    end
+  end
+
   defp normalize_token_type(changeset) do
     case get_change(changeset, :token_type) do
       nil -> changeset
@@ -176,4 +194,11 @@ defmodule Tango.Schemas.Connection do
 
   defp parse_scopes(scopes) when is_list(scopes), do: scopes
   defp parse_scopes(_), do: []
+
+  # Remove sensitive tokens from raw_payload to prevent unencrypted storage
+  defp sanitize_raw_payload(token_response) when is_map(token_response) do
+    Map.drop(token_response, ["access_token", "refresh_token"])
+  end
+
+  defp sanitize_raw_payload(_), do: %{}
 end

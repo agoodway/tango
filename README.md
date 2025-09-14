@@ -87,8 +87,8 @@ Configure Tango in your application:
 config :tango,
   repo: MyApp.Repo,
   schema_prefix: "tango", # Optional
-  encryption_key: System.get_env("TANGO_ENCRYPTION_KEY")
-
+  encryption_key: System.get_env("TANGO_ENCRYPTION_KEY"),
+  api_key: System.get_env("TANGO_API_KEY")
 ```
 
 Run migrations:
@@ -173,71 +173,119 @@ headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 Tango.mark_connection_used(connection)
 ```
 
-## API Routes for External Clients
+## Ready-to-Use OAuth API
 
-For web or mobile clients, set up these Phoenix routes:
+Tango includes a complete OAuth API router that can be mounted in Phoenix applications with a single line.
+
+### Setup
+
+1. Configure API key in your application:
+
+```elixir
+# config/config.exs  
+config :tango,
+  encryption_key: System.get_env("TANGO_ENCRYPTION_KEY"),
+  api_key: System.get_env("TANGO_API_KEY")
+```
+
+2. Add the API router to your Phoenix router:
 
 ```elixir
 # router.ex
-scope "/api/oauth", MyAppWeb do
-  pipe_through :api
+defmodule MyAppWeb.Router do
+  use MyAppWeb, :router
 
-  post "/sessions", OAuthController, :create_session
-  get "/authorize/:session_token", OAuthController, :authorize_url
-  post "/exchange", OAuthController, :exchange_code
-  get "/connections", OAuthController, :list_connections
-  delete "/connections/:provider", OAuthController, :revoke_connection
+  scope "/api/oauth" do
+    pipe_through :api
+    forward "/", Tango.API.Router
+  end
 end
 ```
 
-Example controller:
+### Available Endpoints
+
+The mounted API provides these endpoints:
+
+- `POST /api/oauth/sessions` - Create OAuth session
+- `GET /api/oauth/authorize/:session_token` - Get authorization URL  
+- `POST /api/oauth/exchange` - Exchange authorization code for connection
+- `GET /api/oauth/health` - Health check
+
+### JavaScript Usage
+
+```javascript
+const API_BASE = '/api/oauth';
+const TENANT_ID = 'user-123';
+const API_KEY = 'your-secret-api-key';
+
+// Start OAuth flow
+async function startOAuth(provider, redirectUri, scopes = []) {
+  // Create session
+  const session = await fetch(`${API_BASE}/sessions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Tenant-ID': TENANT_ID,
+      'Authorization': `Bearer ${API_KEY}`
+    },
+    body: JSON.stringify({ provider, redirect_uri: redirectUri, scopes })
+  }).then(r => r.json());
+
+  // Get authorization URL
+  const authUrl = await fetch(
+    `${API_BASE}/authorize/${session.session_token}?redirect_uri=${redirectUri}&scopes=${scopes.join(' ')}`,
+    { 
+      headers: { 
+        'X-Tenant-ID': TENANT_ID,
+        'Authorization': `Bearer ${API_KEY}`
+      } 
+    }
+  ).then(r => r.json());
+
+  // Redirect to OAuth provider
+  window.location.href = authUrl.authorization_url;
+}
+
+// Handle OAuth callback
+async function handleCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const state = params.get('state');
+  const code = params.get('code');
+  
+  if (state && code) {
+    const connection = await fetch(`${API_BASE}/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Tenant-ID': TENANT_ID,
+        'Authorization': `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify({
+        state,
+        code,
+        redirect_uri: window.location.origin + '/callback'
+      })
+    }).then(r => r.json());
+
+    console.log('OAuth connection established:', connection);
+  }
+}
+```
+
+### Connection Management
+
+Use Tango's programmatic API in your Phoenix application to manage connections:
 
 ```elixir
-defmodule MyAppWeb.OAuthController do
-  use MyAppWeb, :controller
+# List connections for a user
+connections = Tango.list_connections(user_id)
 
-  def create_session(conn, %{"provider" => provider, "redirect_uri" => redirect_uri}) do
-    tenant_id = get_current_tenant_id(conn)
+# Get connection for API calls
+{:ok, connection} = Tango.get_connection_for_provider("github", user_id)
+headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 
-    case Tango.create_session(provider, tenant_id, redirect_uri: redirect_uri) do
-      {:ok, session} ->
-        json(conn, %{session_token: session.session_token})
-      {:error, reason} ->
-        conn |> put_status(400) |> json(%{error: reason})
-    end
-  end
-
-  def authorize_url(conn, %{"session_token" => token} = params) do
-    opts = [redirect_uri: params["redirect_uri"], scopes: params["scopes"] || []]
-
-    case Tango.authorize_url(token, opts) do
-      {:ok, url} -> json(conn, %{authorization_url: url})
-      {:error, reason} -> conn |> put_status(400) |> json(%{error: reason})
-    end
-  end
-
-  def exchange_code(conn, %{"state" => state, "code" => code} = params) do
-    # Extract tenant_id from session or request context
-    tenant_id = get_tenant_id(conn)
-    opts = [redirect_uri: params["redirect_uri"]]
-
-    case Tango.exchange_code(state, code, tenant_id, opts) do
-      {:ok, connection} ->
-        json(conn, %{
-          provider: connection.provider.name,
-          status: connection.status,
-          scopes: connection.granted_scopes
-        })
-      {:error, reason} ->
-        conn |> put_status(400) |> json(%{error: reason})
-    end
-  end
-
-  defp get_current_tenant_id(conn) do
-    # Extract tenant ID from JWT, session, etc.
-    conn.assigns.current_user.id
-  end
-end
+# Revoke connection
+{:ok, _revoked} = Tango.revoke_connection(connection, user_id)
 ```
 
 ## Testing
@@ -260,7 +308,6 @@ mix quality
 
 ## Planned Features
 
-- **Drop-in API plug for clients**: Simplified Phoenix plug for OAuth endpoints
 - **TypeScript client library**: Client SDK for web or OAuth flows
 - **Phoenix LiveView components**: Pre-built UI component for OAuth flows
 - **Token Refresh Automation**: Background job integration with automatic token refresh scheduling

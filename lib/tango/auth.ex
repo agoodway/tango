@@ -96,13 +96,13 @@ defmodule Tango.Auth do
   end
 
   defp build_auth_url(oauth_config, session, redirect_uri, scopes) do
-    # Build authorization URL
+    # Build authorization URL with encoded state
     auth_params = %{
       client_id: oauth_config.client_id,
       response_type: "code",
       redirect_uri: redirect_uri,
       scope: Enum.join(scopes, " "),
-      state: session.state
+      state: encode_state_with_tenant(session.state, session.tenant_id)
     }
 
     # Add PKCE challenge if verifier exists
@@ -174,10 +174,15 @@ defmodule Tango.Auth do
            :ok <- Tango.Validation.validate_authorization_code(authorization_code),
            :ok <- Tango.Validation.validate_tenant_id(tenant_id),
            {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
-           {:ok, session} <- get_session_by_state(state, tenant_id),
-           :ok <- OAuthSession.validate_state(session, state),
+           {:ok, original_state, decoded_tenant_id} <- decode_state_with_tenant(state),
+           ^tenant_id <- decoded_tenant_id,
+           {:ok, session} <- get_session_by_state(original_state, tenant_id),
+           :ok <- OAuthSession.validate_state(session, original_state),
            :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]) do
         {:ok, %{session: session, validated_opts: validated_opts}}
+      else
+        {:error, :invalid_state_format} -> {:error, :invalid_state}
+        _ -> {:error, :invalid_state}
       end
     end)
     |> Ecto.Multi.run(:exchange_token, fn _repo,
@@ -223,15 +228,7 @@ defmodule Tango.Auth do
 
       {:error, _failed_operation, reason, _changes} ->
         # Log failed token exchange if session is available
-        case get_session_by_state(state, tenant_id) do
-          {:ok, session} ->
-            AuditLog.log_token_exchange(session, nil, false, reason)
-            |> @repo.insert()
-
-          _ ->
-            :ok
-        end
-
+        log_failed_token_exchange(state, tenant_id, reason)
         {:error, reason}
     end
   end
@@ -369,15 +366,34 @@ defmodule Tango.Auth do
     end
   end
 
-  defp convert_token_to_response(token) do
+  @doc false
+  def convert_token_to_response(token) do
+    # OAuth2 library sometimes returns JSON-encoded token responses
+    # Extract the actual access token from JSON if needed
+    access_token = extract_access_token(token.access_token)
+
     %{
-      "access_token" => token.access_token,
+      "access_token" => access_token,
       "refresh_token" => token.refresh_token,
       "token_type" => token.token_type,
       "expires_in" => calculate_expires_in_seconds(token.expires_at),
       "scope" => token.other_params["scope"]
     }
   end
+
+  # Extract actual access token from potentially JSON-encoded response
+  defp extract_access_token(token) when is_binary(token) do
+    case Jason.decode(token) do
+      {:ok, %{"access_token" => actual_token}} when is_binary(actual_token) ->
+        actual_token
+
+      _ ->
+        # Not JSON or no access_token field, use as-is
+        token
+    end
+  end
+
+  defp extract_access_token(token), do: token
 
   # Atomic version for transaction usage
   defp create_connection_from_token_atomic(repo, provider_id, tenant_id, token_response) do
@@ -453,5 +469,45 @@ defmodule Tango.Auth do
 
   defp session_expired?(session) do
     session.expires_at && DateTime.compare(session.expires_at, DateTime.utc_now()) == :lt
+  end
+
+  # Encode tenant ID into OAuth state parameter for secure transmission
+  defp encode_state_with_tenant(original_state, tenant_id) do
+    state_data = %{
+      csrf_token: original_state,
+      tenant_id: tenant_id
+    }
+
+    state_data
+    |> Jason.encode!()
+    |> Base.url_encode64(padding: false)
+  end
+
+  # Decode tenant ID from OAuth state parameter
+  def decode_state_with_tenant(encoded_state) do
+    with {:ok, decoded} <- Base.url_decode64(encoded_state, padding: false),
+         {:ok, state_data} <- Jason.decode(decoded) do
+      {:ok, state_data["csrf_token"], state_data["tenant_id"]}
+    else
+      _ -> {:error, :invalid_state_format}
+    end
+  end
+
+  # Logs failed token exchange attempts with session context
+  defp log_failed_token_exchange(state, tenant_id, reason) do
+    case decode_state_with_tenant(state) do
+      {:ok, original_state, decoded_tenant_id} when decoded_tenant_id == tenant_id ->
+        case get_session_by_state(original_state, tenant_id) do
+          {:ok, session} ->
+            AuditLog.log_token_exchange(session, nil, false, reason)
+            |> @repo.insert()
+
+          _ ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 end

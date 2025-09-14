@@ -18,6 +18,7 @@ defmodule Tango.IntegrationTest do
   alias Tango.TestRepo, as: Repo
   alias Tango.Types.EncryptedBinary
   alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
+  alias Test.Support.OAuthFlowHelper
 
   describe "complete OAuth flow integration" do
     test "full OAuth lifecycle with GitHub provider" do
@@ -72,7 +73,11 @@ defmodule Tango.IntegrationTest do
       assert String.contains?(auth_url, "https://github.com/login/oauth/authorize")
       assert String.contains?(auth_url, "client_id=github_client_id_123")
       assert String.contains?(auth_url, "redirect_uri=#{URI.encode_www_form(redirect_uri)}")
-      assert String.contains?(auth_url, "state=#{session.state}")
+      # Check that auth_url contains encoded state (not raw session state)
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+      assert is_binary(encoded_state)
+      # Should be encoded, not raw
+      assert encoded_state != session.state
       assert String.contains?(auth_url, "code_challenge=")
       assert String.contains?(auth_url, "code_challenge_method=S256")
       assert String.contains?(auth_url, "scope=user%3Aemail+repo+read%3Aorg")

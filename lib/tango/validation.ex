@@ -57,7 +57,7 @@ defmodule Tango.Validation do
       byte_size(state) < 16 ->
         {:error, :state_too_short}
 
-      byte_size(state) > 128 ->
+      byte_size(state) > 256 ->
         {:error, :state_too_long}
 
       not String.match?(state, ~r/^[a-zA-Z0-9_-]+$/) ->

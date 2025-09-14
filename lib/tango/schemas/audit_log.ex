@@ -35,6 +35,9 @@ defmodule Tango.Schemas.AuditLog do
       values: [
         :oauth_start,
         :token_exchange,
+        :oauth_denied,
+        :oauth_provider_error,
+        :oauth_callback_error,
         :token_refreshed,
         :token_refresh_failed,
         :connection_revoked,
@@ -77,6 +80,15 @@ defmodule Tango.Schemas.AuditLog do
         :timeout,
         :rate_limited,
         :provider_error,
+        :access_denied,
+        :invalid_request,
+        :invalid_client,
+        :invalid_grant,
+        :unsupported_grant_type,
+        :invalid_scope,
+        :server_error,
+        :temporarily_unavailable,
+        :missing_callback_params,
         :unknown_error
       ]
     )
@@ -166,6 +178,29 @@ defmodule Tango.Schemas.AuditLog do
           },
           event_data
         )
+    }
+
+    %__MODULE__{}
+    |> changeset(attrs)
+  end
+
+  @doc "Logs OAuth callback errors (user denial, provider errors, malformed callbacks)"
+  def log_oauth_callback_error(
+        event_type,
+        error_code,
+        tenant_id,
+        session_id \\ nil,
+        event_data \\ %{}
+      )
+      when event_type in [:oauth_denied, :oauth_provider_error, :oauth_callback_error] do
+    attrs = %{
+      event_type: event_type,
+      tenant_id: tenant_id,
+      session_id: session_id,
+      success: false,
+      error_code: error_code,
+      occurred_at: DateTime.utc_now(),
+      event_data: event_data
     }
 
     %__MODULE__{}

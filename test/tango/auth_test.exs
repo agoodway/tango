@@ -42,4 +42,87 @@ defmodule Tango.AuthTest do
                )
     end
   end
+
+  describe "token extraction" do
+    test "extract_access_token handles JSON-encoded OAuth2 responses" do
+      # Test the JSON-encoded token scenario that was causing production issues
+      json_token =
+        Jason.encode!(%{
+          "access_token" => "gho_real_token_123",
+          "token_type" => "bearer",
+          "scope" => "repo,user:email"
+        })
+
+      # This simulates what OAuth2 library sometimes returns
+      oauth2_token = %OAuth2.AccessToken{
+        access_token: json_token,
+        token_type: "Bearer",
+        expires_at: nil,
+        refresh_token: nil,
+        other_params: %{}
+      }
+
+      # Convert using our function
+      result = Tango.Auth.convert_token_to_response(oauth2_token)
+
+      # Should extract the real token, not the JSON string
+      assert result["access_token"] == "gho_real_token_123"
+      assert result["token_type"] == "Bearer"
+    end
+
+    test "extract_access_token handles plain string tokens" do
+      # Test normal token response
+      oauth2_token = %OAuth2.AccessToken{
+        access_token: "plain_token_abc123",
+        token_type: "bearer",
+        expires_at: nil,
+        refresh_token: nil,
+        other_params: %{"scope" => "read"}
+      }
+
+      result = Tango.Auth.convert_token_to_response(oauth2_token)
+
+      # Should pass through plain tokens unchanged
+      assert result["access_token"] == "plain_token_abc123"
+      assert result["token_type"] == "bearer"
+    end
+
+    test "extract_access_token handles malformed JSON gracefully" do
+      # Test invalid JSON input
+      oauth2_token = %OAuth2.AccessToken{
+        access_token: "not-valid-json{",
+        token_type: "bearer",
+        expires_at: nil,
+        refresh_token: nil,
+        other_params: %{}
+      }
+
+      result = Tango.Auth.convert_token_to_response(oauth2_token)
+
+      # Should return the original string when JSON parsing fails
+      assert result["access_token"] == "not-valid-json{"
+    end
+
+    test "extract_access_token handles empty access_token in JSON" do
+      # Test JSON without access_token field
+      json_without_token =
+        Jason.encode!(%{
+          "token_type" => "bearer",
+          "scope" => "read"
+        })
+
+      oauth2_token = %OAuth2.AccessToken{
+        access_token: json_without_token,
+        token_type: "bearer",
+        expires_at: nil,
+        refresh_token: nil,
+        other_params: %{}
+      }
+
+      result = Tango.Auth.convert_token_to_response(oauth2_token)
+
+      # Should return the original JSON when no access_token field found
+      assert result["access_token"] == json_without_token
+    end
+  end
 end

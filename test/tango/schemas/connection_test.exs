@@ -151,7 +151,9 @@ defmodule Tango.Schemas.ConnectionTest do
       # Token type normalization happens in prepare_changes, check field value
       assert get_field(changeset, :token_type) == :bearer
       assert get_change(changeset, :granted_scopes) == ["read", "write", "user:email"]
-      assert get_change(changeset, :raw_payload) == token_response
+      # Raw payload should have tokens removed for security
+      expected_sanitized_payload = Map.drop(token_response, ["access_token", "refresh_token"])
+      assert get_change(changeset, :raw_payload) == expected_sanitized_payload
       # Status is set to "active" but since it's the default, might not be recorded as change
       assert get_field(changeset, :status) == :active
 
@@ -241,10 +243,15 @@ defmodule Tango.Schemas.ConnectionTest do
       assert get_change(changeset, :refresh_exhausted) == false or
                get_field(changeset, :refresh_exhausted) == false
 
-      # Verify raw_payload is merged
+      # Verify raw_payload is merged but tokens are sanitized for security
       new_payload = get_change(changeset, :raw_payload)
       assert new_payload["old"] == "data"
-      assert new_payload["access_token"] == "new_access_token"
+      # Tokens should be removed from raw_payload for security
+      refute Map.has_key?(new_payload, "access_token")
+      refute Map.has_key?(new_payload, "refresh_token")
+      # But other fields should be preserved
+      assert new_payload["expires_in"] == 7200
+      assert new_payload["scope"] == "read write"
     end
 
     test "preserves existing refresh_token when not provided" do
@@ -431,6 +438,50 @@ defmodule Tango.Schemas.ConnectionTest do
       }
 
       assert Connection.can_refresh?(connection) == false
+    end
+  end
+
+  describe "get_raw_access_token/1" do
+    test "extracts access_token from encrypted field" do
+      connection = %Connection{
+        access_token: "gho_123456789",
+        raw_payload: %{
+          "token_type" => "bearer",
+          "scope" => "user:email"
+        }
+      }
+
+      assert Connection.get_raw_access_token(connection) == "gho_123456789"
+    end
+
+    test "returns nil when access_token is nil" do
+      connection = %Connection{
+        access_token: nil,
+        raw_payload: %{"other_field" => "value"}
+      }
+
+      assert Connection.get_raw_access_token(connection) == nil
+    end
+
+    test "handles empty access_token" do
+      connection = %Connection{
+        access_token: "",
+        raw_payload: %{"other_field" => "value"}
+      }
+
+      assert Connection.get_raw_access_token(connection) == ""
+    end
+
+    test "handles nil raw_payload" do
+      connection = %Connection{raw_payload: nil}
+
+      assert Connection.get_raw_access_token(connection) == nil
+    end
+
+    test "handles empty raw_payload" do
+      connection = %Connection{raw_payload: %{}}
+
+      assert Connection.get_raw_access_token(connection) == nil
     end
   end
 

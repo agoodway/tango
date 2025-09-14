@@ -4,6 +4,8 @@ import Config
 config :tango,
   # Use a deterministic test encryption key (32 bytes)
   encryption_key: Base.decode64!("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU="),
+  # API key for client authentication
+  api_key: "lets-dance-the-tango",
   # Use test repo for library testing
   repo: Tango.TestRepo,
   ecto_repos: [Tango.TestRepo]

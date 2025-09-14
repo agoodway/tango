@@ -4,6 +4,23 @@ defmodule Tango do
 
   Provides OAuth2 Authorization Code Flow with PKCE support,
   multi-tenant token management, and provider configuration.
+
+  ## Ready-to-Use API
+
+  For Phoenix applications, Tango provides a complete OAuth API that can be
+  mounted with a single line:
+
+      # In your Phoenix router
+      scope "/api/oauth" do
+        pipe_through :api
+        forward "/", Tango.API.Router
+      end
+
+  See `Tango.API` for complete setup and usage documentation.
+
+  ## Direct Library Usage
+
+  You can also use Tango's functions directly in your application code:
   """
 
   @doc """
@@ -92,6 +109,17 @@ defmodule Tango do
 
   """
   defdelegate get_provider(name), to: Tango.Provider
+
+  @doc """
+  Gets provider by ID.
+
+  ## Examples
+
+      iex> Tango.get_provider_by_id(provider_id)
+      {:ok, %Tango.Schemas.Provider{}}
+
+  """
+  defdelegate get_provider_by_id(id), to: Tango.Provider
 
   @doc """
   Creates a new provider.

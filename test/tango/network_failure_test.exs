@@ -10,6 +10,7 @@ defmodule Tango.NetworkFailureTest do
 
   alias Tango.{Auth, Connection}
   alias Tango.{Factory, OAuthMockServer}
+  alias Test.Support.OAuthFlowHelper
 
   describe "OAuth code exchange network failures" do
     setup do
@@ -26,12 +27,17 @@ defmodule Tango.NetworkFailureTest do
       provider = Factory.create_github_provider("_exchange_timeout", urls: urls)
       tenant_id = Factory.tenant_id("exchange_test")
 
-      # Create a session for code exchange
-      {:ok, session} = Auth.create_session(provider.name, tenant_id)
+      # Create a session for code exchange and get encoded state
+      {:ok, encoded_state, _session} =
+        OAuthFlowHelper.get_encoded_state_for_session(
+          provider.name,
+          tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
 
       # Attempt code exchange - this will timeout due to mock server behavior
       result =
-        Auth.exchange_code(session.state, "fake_auth_code", tenant_id,
+        Auth.exchange_code(encoded_state, "fake_auth_code", tenant_id,
           redirect_uri: "https://app.com/callback"
         )
 
@@ -55,12 +61,17 @@ defmodule Tango.NetworkFailureTest do
       provider = Factory.create_github_provider("_exchange_invalid", urls: urls)
       tenant_id = Factory.tenant_id("exchange_invalid_test")
 
-      # Create session
-      {:ok, session} = Auth.create_session(provider.name, tenant_id)
+      # Create session and get encoded state
+      {:ok, encoded_state, _session} =
+        OAuthFlowHelper.get_encoded_state_for_session(
+          provider.name,
+          tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
 
       # Test with valid code but invalid server response
       result =
-        Auth.exchange_code(session.state, "valid_auth_code", tenant_id,
+        Auth.exchange_code(encoded_state, "valid_auth_code", tenant_id,
           redirect_uri: "https://app.com/callback"
         )
 
@@ -77,8 +88,13 @@ defmodule Tango.NetworkFailureTest do
       provider = Factory.create_github_provider("_invalid_codes", urls: urls)
       tenant_id = Factory.tenant_id("invalid_codes_test")
 
-      # Create session
-      {:ok, session} = Auth.create_session(provider.name, tenant_id)
+      # Create session and get encoded state
+      {:ok, encoded_state, _session} =
+        OAuthFlowHelper.get_encoded_state_for_session(
+          provider.name,
+          tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
 
       # Test with obviously invalid authorization codes
       invalid_codes = [
@@ -90,7 +106,7 @@ defmodule Tango.NetworkFailureTest do
 
       for invalid_code <- invalid_codes do
         result =
-          Auth.exchange_code(session.state, invalid_code, tenant_id,
+          Auth.exchange_code(encoded_state, invalid_code, tenant_id,
             redirect_uri: "https://app.com/callback"
           )
 

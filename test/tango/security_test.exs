@@ -11,6 +11,7 @@ defmodule Tango.SecurityTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias Tango.{Audit.Sanitizer, Auth, Factory, OAuthMockServer}
   alias Tango.Schemas.{Connection, OAuthSession, Provider}
+  alias Test.Support.OAuthFlowHelper
 
   describe "cross-tenant session isolation" do
     setup do
@@ -25,16 +26,18 @@ defmodule Tango.SecurityTest do
       tenant_a = "tenant-a-123"
       tenant_b = "tenant-b-456"
 
-      # Create session for tenant A
-      {:ok, session_a} = Auth.create_session(provider.slug, tenant_a)
-
-      # Tenant B should not be able to use tenant A's session state
+      # Try to use OAuth flow but exchange with wrong tenant (should fail)
       result =
-        Auth.exchange_code(session_a.state, "auth_code_123", tenant_b,
+        OAuthFlowHelper.test_cross_tenant_exchange(
+          provider.slug,
+          tenant_a,
+          tenant_b,
+          "auth_code_123",
           redirect_uri: "https://app.com/callback"
         )
 
-      assert {:error, :session_not_found} = result
+      # Should fail due to tenant mismatch in state validation
+      assert {:error, :invalid_state} = result
     end
 
     test "same state parameter can exist for different tenants", %{provider_a: provider} do
@@ -277,23 +280,37 @@ defmodule Tango.SecurityTest do
       %{provider: provider, bypass: bypass}
     end
 
-    test "token exchange with same session state cleanup prevents reuse", %{provider: provider} do
+    test "session cleanup after successful exchange prevents reuse", %{provider: provider} do
       tenant_id = "tenant-123"
-      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
-      # First token exchange should succeed
+      # Create session and get encoded state
+      {:ok, encoded_state, _session} =
+        OAuthFlowHelper.get_encoded_state_for_session(
+          provider.slug,
+          tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
+
+      # First exchange should succeed
       {:ok, _connection} =
-        Auth.exchange_code(session.state, "auth_code_1", tenant_id,
+        Auth.exchange_code(
+          encoded_state,
+          "auth_code_1",
+          tenant_id,
           redirect_uri: "https://app.com/callback"
         )
 
-      # Second token exchange with same state should fail (session cleaned up)
+      # Session should be cleaned up, so same state can't be reused
       {:error, reason} =
-        Auth.exchange_code(session.state, "auth_code_2", tenant_id,
+        Auth.exchange_code(
+          encoded_state,
+          "auth_code_2",
+          tenant_id,
           redirect_uri: "https://app.com/callback"
         )
 
-      assert reason == :session_not_found
+      # State no longer valid due to session cleanup
+      assert reason == :invalid_state
     end
 
     test "concurrent session creation with same state should fail", %{provider: provider} do

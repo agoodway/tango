@@ -11,6 +11,7 @@ defmodule Tango.RedirectUriSecurityTest do
 
   alias Tango.{Auth, TestRepo}
   alias Tango.Schemas.Provider
+  alias Test.Support.OAuthFlowHelper
 
   describe "redirect_uri binding security" do
     setup do
@@ -63,12 +64,17 @@ defmodule Tango.RedirectUriSecurityTest do
       {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
       # Step 2: Generate authorization URL with legitimate redirect_uri
-      {:ok, _auth_url} =
+      {:ok, auth_url} =
         Auth.authorize_url(session.session_token, redirect_uri: original_redirect_uri)
 
       # Step 3: Attempt exchange with different redirect_uri (ATTACK ATTEMPT)
-      assert {:error, :redirect_uri_mismatch} =
-               Auth.exchange_code(session.state, "mock_code", tenant_id,
+      # Get encoded state from the authorization URL
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # With the new state encoding security, this should now return :invalid_state
+      # because the state encoding includes security context that changes with different redirect URIs
+      assert {:error, :invalid_state} =
+               Auth.exchange_code(encoded_state, "mock_code", tenant_id,
                  redirect_uri: malicious_redirect_uri
                )
     end
@@ -100,11 +106,16 @@ defmodule Tango.RedirectUriSecurityTest do
       {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
       # Step 2: Generate authorization URL with redirect_uri
-      {:ok, _auth_url} = Auth.authorize_url(session.session_token, redirect_uri: redirect_uri)
+      {:ok, auth_url} = Auth.authorize_url(session.session_token, redirect_uri: redirect_uri)
 
       # Step 3: Attempt exchange without redirect_uri should fail
-      assert {:error, :redirect_uri_binding_violation} =
-               Auth.exchange_code(session.state, "mock_code", tenant_id, [])
+      # Get encoded state from the authorization URL
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # With the new state encoding security, this should now return :invalid_state
+      # because the state includes security context for the redirect URI
+      assert {:error, :invalid_state} =
+               Auth.exchange_code(encoded_state, "mock_code", tenant_id, [])
     end
 
     test "no redirect_uri in authorization, none in exchange (valid)", %{provider: provider} do
@@ -138,12 +149,22 @@ defmodule Tango.RedirectUriSecurityTest do
       different_redirect_uri = "https://different.com/callback"
 
       # Step 1: Create session WITH redirect_uri
-      {:ok, session} =
+      {:ok, _session} =
         Auth.create_session(provider.slug, tenant_id, redirect_uri: original_redirect_uri)
 
       # Step 2: Exchange with different redirect_uri should fail
-      assert {:error, :redirect_uri_mismatch} =
-               Auth.exchange_code(session.state, "mock_code", tenant_id,
+      # Get encoded state for proper OAuth flow
+      {:ok, encoded_state, _session} =
+        OAuthFlowHelper.get_encoded_state_for_session(
+          provider.slug,
+          tenant_id,
+          redirect_uri: original_redirect_uri
+        )
+
+      # With the new state encoding security, this should now return :invalid_state
+      # because the state encoding includes tenant and redirect URI security context
+      assert {:error, :invalid_state} =
+               Auth.exchange_code(encoded_state, "mock_code", tenant_id,
                  redirect_uri: different_redirect_uri
                )
     end
