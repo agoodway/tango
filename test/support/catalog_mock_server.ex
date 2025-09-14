@@ -34,8 +34,6 @@ defmodule Tango.CatalogMockServer do
     "http://localhost:#{bypass.port}/packages/providers/providers.yaml"
   end
 
-  # Private functions
-
   defp mock_providers_yaml do
     """
     # Mock Nango providers catalog for testing

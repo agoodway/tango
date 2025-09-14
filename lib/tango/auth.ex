@@ -13,8 +13,8 @@ defmodule Tango.Auth do
 
   alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
 
-  @type session_result :: {:ok, OAuthSession.t()} | {:error, atom()}
-  @type connection_result :: {:ok, Connection.t()} | {:error, atom()}
+  @type session_result :: {:ok, %OAuthSession{}} | {:error, atom()}
+  @type connection_result :: {:ok, %Connection{}} | {:error, atom()}
   @type auth_url_result :: {:ok, String.t()} | {:error, atom()}
   @type cleanup_result :: {:ok, non_neg_integer()} | {:error, atom()}
 
@@ -27,7 +27,7 @@ defmodule Tango.Auth do
 
       iex> create_session("github", "user-123")
       {:ok, %OAuthSession{}}
-      
+
       iex> create_session("nonexistent", "user-123")
       {:error, :provider_not_found}
 
@@ -74,8 +74,8 @@ defmodule Tango.Auth do
 
       iex> authorize_url("session_token_123", redirect_uri: "https://app.com/callback")
       {:ok, "https://github.com/login/oauth/authorize?client_id=..."}
-      
-      iex> authorize_url("invalid_token", redirect_uri: "https://app.com/callback")  
+
+      iex> authorize_url("invalid_token", redirect_uri: "https://app.com/callback")
       {:error, :session_not_found}
 
   """
@@ -135,7 +135,7 @@ defmodule Tango.Auth do
 
       iex> exchange_code("state_123", "auth_code_456", "tenant-123", redirect_uri: "https://app.com/callback")
       {:ok, %Connection{}}
-      
+
       iex> exchange_code("invalid_state", "code", "tenant-123", redirect_uri: "https://app.com/callback")
       {:error, :invalid_state}
 
@@ -143,7 +143,6 @@ defmodule Tango.Auth do
       {:error, :tenant_mismatch}
 
   """
-  # Handle invalid parameter types gracefully
   @spec exchange_code(String.t(), String.t(), String.t(), keyword()) :: connection_result()
   def exchange_code(state, _authorization_code, _tenant_id, _opts)
       when not is_binary(state) do
@@ -165,7 +164,6 @@ defmodule Tango.Auth do
     {:error, :invalid_options}
   end
 
-  # New secure API with explicit tenant_id parameter (recommended)
   def exchange_code(state, authorization_code, tenant_id, opts)
       when is_binary(state) and is_binary(authorization_code) and is_binary(tenant_id) and
              is_list(opts) do
@@ -245,8 +243,8 @@ defmodule Tango.Auth do
 
       iex> get_session("valid_token")
       {:ok, %OAuthSession{}}
-      
-      iex> get_session("expired_token") 
+
+      iex> get_session("expired_token")
       {:error, :session_expired}
 
   """
@@ -284,8 +282,6 @@ defmodule Tango.Auth do
 
     {:ok, count}
   end
-
-  # Private helper functions
 
   defp get_valid_session(session_token) do
     case @repo.get_by(OAuthSession, session_token: session_token) do
@@ -351,14 +347,6 @@ defmodule Tango.Auth do
     end
   end
 
-  defp validate_access_token(nil) do
-    {:error, :missing_access_token}
-  end
-
-  defp validate_access_token(_) do
-    {:error, :invalid_access_token_type}
-  end
-
   defp build_authorization_url(base_url, params) do
     query_string = URI.encode_query(params)
     "#{base_url}?#{query_string}"
@@ -401,8 +389,13 @@ defmodule Tango.Auth do
               "refresh_token" => token.refresh_token,
               "token_type" => token.token_type,
               "expires_in" =>
-                token.expires_at &&
-                  DateTime.diff(DateTime.from_unix!(token.expires_at), DateTime.utc_now()),
+                case token.expires_at do
+                  expires_at when is_integer(expires_at) ->
+                    calculate_expires_in_seconds(expires_at)
+
+                  _ ->
+                    nil
+                end,
               "scope" => token.other_params["scope"]
             }
 
@@ -480,5 +473,9 @@ defmodule Tango.Auth do
         # redirect_uri mismatch
         {:error, :redirect_uri_mismatch}
     end
+  end
+
+  defp calculate_expires_in_seconds(expires_at) when is_integer(expires_at) do
+    DateTime.diff(DateTime.from_unix!(expires_at), DateTime.utc_now())
   end
 end

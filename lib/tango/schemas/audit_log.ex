@@ -271,8 +271,6 @@ defmodule Tango.Schemas.AuditLog do
     |> changeset(attrs)
   end
 
-  # Private helper functions
-
   defp generate_sensitive_data_hash(changeset) do
     case get_change(changeset, :event_data) do
       nil ->

@@ -20,9 +20,7 @@ defmodule Tango do
       {:error, :provider_not_found}
 
   """
-  def create_session(provider_name, tenant_id, opts \\ []) do
-    Tango.Auth.create_session(provider_name, tenant_id, opts)
-  end
+  defdelegate create_session(provider_name, tenant_id, opts \\ []), to: Tango.Auth
 
   @doc """
   Generates OAuth authorization URL with PKCE support.
@@ -33,14 +31,13 @@ defmodule Tango do
       {:ok, "https://provider.com/oauth/authorize?..."}
 
   """
-  def authorize_url(session_token, opts \\ []) do
-    Tango.Auth.authorize_url(session_token, opts)
-  end
+  defdelegate authorize_url(session_token, opts \\ []), to: Tango.Auth
 
   @doc """
   Exchanges authorization code for access token.
 
-  SECURITY: Use the 4-argument version with tenant_id for secure multi-tenant isolation.
+  Validates session state, exchanges code with provider, and creates connection
+  with multi-tenant isolation.
 
   ## Examples
 
@@ -48,11 +45,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{}}
 
   """
-  # Secure version with tenant validation (recommended)
-  def exchange_code(state, code, tenant_id, opts)
-      when is_binary(state) and is_binary(code) and is_binary(tenant_id) and is_list(opts) do
-    Tango.Auth.exchange_code(state, code, tenant_id, opts)
-  end
+  defdelegate exchange_code(state, code, tenant_id, opts), to: Tango.Auth
 
   @doc """
   Gets OAuth session by token.
@@ -63,9 +56,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.OAuthSession{}}
 
   """
-  def get_session(session_token) do
-    Tango.Auth.get_session(session_token)
-  end
+  defdelegate get_session(session_token), to: Tango.Auth
 
   @doc """
   Cleans up expired OAuth sessions.
@@ -76,9 +67,7 @@ defmodule Tango do
       {:ok, 5}  # 5 sessions cleaned up
 
   """
-  def cleanup_expired_sessions do
-    Tango.Auth.cleanup_expired_sessions()
-  end
+  defdelegate cleanup_expired_sessions(), to: Tango.Auth
 
   # Provider management functions
 
@@ -91,9 +80,7 @@ defmodule Tango do
       [%Tango.Schemas.Provider{}, ...]
 
   """
-  def list_providers do
-    Tango.Provider.list_providers()
-  end
+  defdelegate list_providers(), to: Tango.Provider
 
   @doc """
   Gets provider by name.
@@ -104,9 +91,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Provider{}}
 
   """
-  def get_provider(name) do
-    Tango.Provider.get_provider(name)
-  end
+  defdelegate get_provider(name), to: Tango.Provider
 
   @doc """
   Creates a new provider.
@@ -117,9 +102,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Provider{}}
 
   """
-  def create_provider(attrs) do
-    Tango.Provider.create_provider(attrs)
-  end
+  defdelegate create_provider(attrs), to: Tango.Provider
 
   @doc """
   Creates provider from Nango configuration.
@@ -130,9 +113,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Provider{}}
 
   """
-  def create_provider_from_nango(name, nango_config, opts \\ []) do
-    Tango.Provider.create_provider_from_nango(name, nango_config, opts)
-  end
+  defdelegate create_provider_from_nango(name, nango_config, opts \\ []), to: Tango.Provider
 
   @doc """
   Updates a provider.
@@ -143,9 +124,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Provider{}}
 
   """
-  def update_provider(provider, attrs) do
-    Tango.Provider.update_provider(provider, attrs)
-  end
+  defdelegate update_provider(provider, attrs), to: Tango.Provider
 
   @doc """
   Soft deletes a provider.
@@ -156,9 +135,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Provider{active: false}}
 
   """
-  def delete_provider(provider) do
-    Tango.Provider.delete_provider(provider)
-  end
+  defdelegate delete_provider(provider), to: Tango.Provider
 
   # Connection management functions
 
@@ -171,9 +148,7 @@ defmodule Tango do
       [%Tango.Schemas.Connection{}, ...]
 
   """
-  def list_connections(tenant_id, opts \\ []) do
-    Tango.Connection.list_connections(tenant_id, opts)
-  end
+  defdelegate list_connections(tenant_id, opts \\ []), to: Tango.Connection
 
   @doc """
   Gets connection for provider and tenant.
@@ -184,9 +159,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{}}
 
   """
-  def get_connection_for_provider(provider_name, tenant_id) do
-    Tango.Connection.get_connection_for_provider(provider_name, tenant_id)
-  end
+  defdelegate get_connection_for_provider(provider_name, tenant_id), to: Tango.Connection
 
   @doc """
   Refreshes an OAuth connection's access token.
@@ -197,9 +170,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{}}
 
   """
-  def refresh_connection(connection) do
-    Tango.Connection.refresh_connection(connection)
-  end
+  defdelegate refresh_connection(connection), to: Tango.Connection
 
   @doc """
   Marks connection as used (updates timestamp).
@@ -210,9 +181,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{}}
 
   """
-  def mark_connection_used(connection) do
-    Tango.Connection.mark_connection_used(connection)
-  end
+  defdelegate mark_connection_used(connection), to: Tango.Connection
 
   @doc """
   Revokes a connection for a tenant.
@@ -223,9 +192,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{status: :revoked}}
 
   """
-  def revoke_connection(connection, tenant_id) do
-    Tango.Connection.revoke_connection(connection, tenant_id)
-  end
+  defdelegate revoke_connection(connection, tenant_id), to: Tango.Connection
 
   @doc """
   Refreshes connections about to expire.
@@ -236,7 +203,5 @@ defmodule Tango do
       {:ok, 3}  # 3 connections refreshed
 
   """
-  def refresh_expiring_connections do
-    Tango.Connection.refresh_expiring_connections()
-  end
+  defdelegate refresh_expiring_connections(), to: Tango.Connection
 end

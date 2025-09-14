@@ -113,8 +113,9 @@ defmodule Tango.Connection do
 
   """
   def mark_connection_used(%Connection{} = connection) do
-    changeset = Connection.changeset(connection, %{last_used_at: DateTime.utc_now()})
-    @repo.update(changeset)
+    connection
+    |> Connection.changeset(%{last_used_at: DateTime.utc_now()})
+    |> @repo.update()
   end
 
   @doc """
@@ -172,7 +173,7 @@ defmodule Tango.Connection do
   """
   def refresh_expiring_connections do
     # Find connections that need refresh
-    buffer_time = DateTime.add(DateTime.utc_now(), 10 * 60, :second)
+    buffer_time = refresh_buffer_time()
 
     connections =
       from(c in Connection,
@@ -218,24 +219,24 @@ defmodule Tango.Connection do
       {:ok, %Connection{status: "revoked"}}
 
   """
-  def revoke_connection(%Connection{} = connection, tenant_id) do
-    if connection.tenant_id == tenant_id do
-      changeset = Connection.changeset(connection, %{status: "revoked"})
+  def revoke_connection(%Connection{tenant_id: tenant_id} = connection, tenant_id) do
+    changeset = Connection.changeset(connection, %{status: "revoked"})
 
-      case @repo.update(changeset) do
-        {:ok, revoked_connection} ->
-          # Log connection revocation
-          AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
-          |> @repo.insert()
+    case @repo.update(changeset) do
+      {:ok, revoked_connection} ->
+        # Log connection revocation
+        AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
+        |> @repo.insert()
 
-          {:ok, revoked_connection}
+        {:ok, revoked_connection}
 
-        error ->
-          error
-      end
-    else
-      {:error, :not_authorized}
+      error ->
+        error
     end
+  end
+
+  def revoke_connection(%Connection{}, _tenant_id) do
+    {:error, :not_authorized}
   end
 
   @doc """
@@ -310,8 +311,7 @@ defmodule Tango.Connection do
 
   """
   def cleanup_expired_connections do
-    # 30 days ago
-    cleanup_cutoff = DateTime.add(DateTime.utc_now(), -30 * 24 * 60 * 60, :second)
+    cleanup_cutoff = cleanup_cutoff_date()
 
     {count, _} =
       from(c in Connection,
@@ -378,8 +378,6 @@ defmodule Tango.Connection do
     }
   end
 
-  # Private helper functions
-
   defp validate_refresh_eligibility(%Connection{} = connection) do
     cond do
       not Connection.can_refresh?(connection) ->
@@ -409,24 +407,21 @@ defmodule Tango.Connection do
         token_url: oauth_config.token_url
       )
 
-    # Create token struct for refresh
-    token = %OAuth2.AccessToken{
-      access_token: connection.access_token,
+    # Prepare refresh parameters
+    refresh_params = [
       refresh_token: connection.refresh_token,
-      token_type: connection.token_type
-    }
+      grant_type: "refresh_token"
+    ]
 
     # Perform refresh
-    case OAuth2.Client.refresh_token(client, token) do
+    case OAuth2.Client.refresh_token(client, refresh_params) do
       {:ok, %{token: %OAuth2.AccessToken{} = new_token}} ->
         # Convert to our token response format
         token_response = %{
           "access_token" => new_token.access_token,
           "refresh_token" => new_token.refresh_token || connection.refresh_token,
           "token_type" => new_token.token_type,
-          "expires_in" =>
-            new_token.expires_at &&
-              DateTime.diff(DateTime.from_unix!(new_token.expires_at), DateTime.utc_now()),
+          "expires_in" => calculate_expires_in(new_token.expires_at),
           "scope" => new_token.other_params["scope"]
         }
 
@@ -441,12 +436,28 @@ defmodule Tango.Connection do
   end
 
   defp update_connection_from_refresh(connection, token_response) do
-    changeset = Connection.refresh_changeset(connection, token_response)
-    @repo.update(changeset)
+    connection
+    |> Connection.refresh_changeset(token_response)
+    |> @repo.update()
   end
 
   defp record_refresh_failure(connection, reason) do
-    changeset = Connection.record_refresh_failure(connection, reason)
-    @repo.update(changeset)
+    connection
+    |> Connection.record_refresh_failure(reason)
+    |> @repo.update()
+  end
+
+  defp calculate_expires_in(expires_at) do
+    expires_at
+    |> DateTime.from_unix!()
+    |> DateTime.diff(DateTime.utc_now())
+  end
+
+  defp cleanup_cutoff_date do
+    DateTime.add(DateTime.utc_now(), -30 * 24 * 60 * 60, :second)
+  end
+
+  defp refresh_buffer_time do
+    DateTime.add(DateTime.utc_now(), 10 * 60, :second)
   end
 end

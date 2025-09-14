@@ -147,9 +147,7 @@ defmodule Tango.Provider do
       {:error, %Ecto.Changeset{}}
 
   """
-  def update_provider(%Provider{} = provider, attrs) do
-    old_config = provider.config
-
+  def update_provider(%Provider{config: old_config} = provider, attrs) do
     result =
       provider
       |> Provider.changeset(attrs)

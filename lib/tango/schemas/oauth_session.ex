@@ -104,8 +104,6 @@ defmodule Tango.Schemas.OAuthSession do
     not expired?(session)
   end
 
-  # Private helper functions
-
   defp validate_expires_at(changeset) do
     case get_field(changeset, :expires_at) do
       nil ->

@@ -111,8 +111,6 @@ defmodule Tango.Audit.Sanitizer do
 
   def hash_sensitive_data(data), do: hash_sensitive_data(to_string(data))
 
-  # Private helper functions
-
   defp sanitize_sensitive_fields(%{} = data) when is_map(data) do
     Enum.reduce(@sensitive_fields, data, fn field, acc ->
       case Map.get(acc, field) do

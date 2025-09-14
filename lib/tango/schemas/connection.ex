@@ -98,7 +98,7 @@ defmodule Tango.Schemas.Connection do
       access_token: token_response["access_token"],
       refresh_token: token_response["refresh_token"] || connection.refresh_token,
       expires_at: calculate_expiration(token_response["expires_in"]),
-      granted_scopes: parse_scopes(token_response["scope"]) || connection.granted_scopes,
+      granted_scopes: parse_scopes(token_response["scope"]),
       raw_payload: Map.merge(connection.raw_payload || %{}, token_response),
       refresh_attempts: 0,
       last_refresh_failure: nil,
@@ -139,20 +139,21 @@ defmodule Tango.Schemas.Connection do
   def needs_refresh?(%__MODULE__{expires_at: nil}), do: false
 
   def needs_refresh?(%__MODULE__{expires_at: expires_at}) do
-    # Refresh 5 minutes before expiration
-    buffer_time = DateTime.add(DateTime.utc_now(), 5 * 60, :second)
+    buffer_time = refresh_buffer_time()
     DateTime.compare(buffer_time, expires_at) != :lt
   end
 
   @doc "Checks if connection can be refreshed"
-  def can_refresh?(%__MODULE__{} = connection) do
-    connection.refresh_token != nil and
-      not connection.refresh_exhausted and
-      connection.auto_refresh_enabled and
-      connection.status == :active
-  end
+  def can_refresh?(%__MODULE__{
+        refresh_token: refresh_token,
+        refresh_exhausted: false,
+        auto_refresh_enabled: true,
+        status: :active
+      })
+      when not is_nil(refresh_token),
+      do: true
 
-  # Private helper functions
+  def can_refresh?(%__MODULE__{}), do: false
 
   defp normalize_token_type(changeset) do
     case get_change(changeset, :token_type) do
@@ -161,15 +162,10 @@ defmodule Tango.Schemas.Connection do
     end
   end
 
-  defp normalize_token_type_value(token_type) when is_binary(token_type) do
-    case token_type do
-      "Bearer" -> :bearer
-      "bearer" -> :bearer
-      "token" -> :bearer
-      _ -> :bearer
-    end
-  end
-
+  defp normalize_token_type_value("Bearer"), do: :bearer
+  defp normalize_token_type_value("bearer"), do: :bearer
+  defp normalize_token_type_value("token"), do: :bearer
+  defp normalize_token_type_value(token_type) when is_binary(token_type), do: :bearer
   defp normalize_token_type_value(nil), do: :bearer
   defp normalize_token_type_value(atom) when is_atom(atom), do: atom
 
@@ -178,6 +174,10 @@ defmodule Tango.Schemas.Connection do
   end
 
   defp calculate_expiration(_), do: nil
+
+  defp refresh_buffer_time do
+    DateTime.add(DateTime.utc_now(), 5 * 60, :second)
+  end
 
   defp parse_scopes(scope) when is_binary(scope) do
     scope

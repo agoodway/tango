@@ -82,19 +82,17 @@ defmodule Tango.Validation do
       {:error, :invalid_authorization_code}
 
   """
+  def validate_authorization_code(""), do: {:error, :invalid_authorization_code}
+
+  def validate_authorization_code(code) when is_binary(code) and byte_size(code) > 512 do
+    {:error, :authorization_code_too_long}
+  end
+
   def validate_authorization_code(code) when is_binary(code) do
-    cond do
-      byte_size(code) == 0 ->
-        {:error, :invalid_authorization_code}
-
-      byte_size(code) > 512 ->
-        {:error, :authorization_code_too_long}
-
-      not String.match?(code, ~r/^[a-zA-Z0-9_.-]+$/) ->
-        {:error, :invalid_authorization_code}
-
-      true ->
-        :ok
+    if String.match?(code, ~r/^[a-zA-Z0-9_.-]+$/) do
+      :ok
+    else
+      {:error, :invalid_authorization_code}
     end
   end
 
@@ -112,19 +110,17 @@ defmodule Tango.Validation do
       {:error, :invalid_provider_slug}
 
   """
+  def validate_provider_slug(""), do: {:error, :invalid_provider_slug}
+
+  def validate_provider_slug(slug) when is_binary(slug) and byte_size(slug) > 50 do
+    {:error, :provider_slug_too_long}
+  end
+
   def validate_provider_slug(slug) when is_binary(slug) do
-    cond do
-      byte_size(slug) == 0 ->
-        {:error, :invalid_provider_slug}
-
-      byte_size(slug) > 50 ->
-        {:error, :provider_slug_too_long}
-
-      not String.match?(slug, ~r/^[a-z0-9_-]+$/) ->
-        {:error, :invalid_provider_slug}
-
-      true ->
-        :ok
+    if String.match?(slug, ~r/^[a-z0-9_-]+$/) do
+      :ok
+    else
+      {:error, :invalid_provider_slug}
     end
   end
 

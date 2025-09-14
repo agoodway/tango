@@ -92,8 +92,6 @@ defmodule Tango.Catalog do
     end
   end
 
-  # Private functions
-
   defp fetch_yaml_content do
     url = Application.get_env(:tango, :nango_providers_url, @default_nango_providers_url)
 
