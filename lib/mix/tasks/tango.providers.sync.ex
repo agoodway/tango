@@ -48,7 +48,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
     ensure_repo_started()
     Shell.info("📡 Fetching Nango provider catalog...")
 
-    case Tango.Catalog.fetch_catalog() do
+    case Tango.Catalog.get_catalog() do
       {:ok, catalog} ->
         filtered_catalog = filter_catalog(catalog, opts)
         local_providers = get_local_providers()

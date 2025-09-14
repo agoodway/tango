@@ -217,8 +217,8 @@ defmodule Tango.IntegrationTest do
       status_change_log =
         AuditLog.log_connection_status_change(
           connection,
-          "active",
-          "expired",
+          :active,
+          :expired,
           "token_expired"
         )
 
@@ -227,8 +227,8 @@ defmodule Tango.IntegrationTest do
       assert get_change(status_change_log, :connection_id) == connection.id
 
       status_event_data = get_change(status_change_log, :event_data)
-      assert status_event_data.old_status == "active"
-      assert status_event_data.new_status == "expired"
+      assert status_event_data.old_status == :active
+      assert status_event_data.new_status == :expired
       assert status_event_data.reason == "token_expired"
     end
 

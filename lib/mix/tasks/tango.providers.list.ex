@@ -22,7 +22,7 @@ defmodule Mix.Tasks.Tango.Providers.List do
   def run(_args) do
     Shell.info("📡 Fetching Nango provider catalog...")
 
-    case Tango.Catalog.fetch_catalog() do
+    case Tango.Catalog.get_catalog() do
       {:ok, catalog} ->
         Shell.info("Found #{map_size(catalog)} providers in catalog\n")
 

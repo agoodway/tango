@@ -97,7 +97,7 @@ defmodule Tango.Provider do
     case result do
       {:ok, provider} ->
         # Log provider creation
-        AuditLog.log_provider_event("provider_created", provider, true)
+        AuditLog.log_provider_event(:provider_created, provider, true)
         |> @repo.insert()
 
         {:ok, provider}
@@ -122,7 +122,7 @@ defmodule Tango.Provider do
     case @repo.insert(changeset) do
       {:ok, provider} ->
         # Log provider creation
-        AuditLog.log_provider_event("provider_created", provider, true, %{
+        AuditLog.log_provider_event(:provider_created, provider, true, %{
           source: "nango_catalog",
           nango_provider: name
         })
@@ -159,7 +159,7 @@ defmodule Tango.Provider do
       {:ok, updated_provider} ->
         # Log provider update if config changed
         if updated_provider.config != old_config do
-          AuditLog.log_provider_event("provider_updated", updated_provider, true, %{
+          AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
             config_changed: true
           })
           |> @repo.insert()
@@ -193,7 +193,7 @@ defmodule Tango.Provider do
     case result do
       {:ok, updated_provider} ->
         # Log provider deletion
-        AuditLog.log_provider_event("provider_deleted", updated_provider, true)
+        AuditLog.log_provider_event(:provider_deleted, updated_provider, true)
         |> @repo.insert()
 
         {:ok, updated_provider}
@@ -221,7 +221,7 @@ defmodule Tango.Provider do
     case result do
       {:ok, updated_provider} ->
         # Log provider activation
-        AuditLog.log_provider_event("provider_updated", updated_provider, true, %{
+        AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
           action: "activated"
         })
         |> @repo.insert()

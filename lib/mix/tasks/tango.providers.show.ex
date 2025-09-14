@@ -23,7 +23,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
   def run([provider_name | _]) when is_binary(provider_name) do
     Shell.info("📡 Fetching provider details for '#{provider_name}'...")
 
-    case Tango.Catalog.fetch_catalog() do
+    case Tango.Catalog.get_catalog() do
       {:ok, catalog} ->
         case Map.get(catalog, provider_name) do
           nil ->

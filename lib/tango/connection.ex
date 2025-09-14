@@ -139,7 +139,7 @@ defmodule Tango.Connection do
          {:ok, token_response} <- perform_token_refresh(oauth_config, connection),
          {:ok, updated_connection} <- update_connection_from_refresh(connection, token_response) do
       # Log successful refresh
-      AuditLog.log_connection_event("token_refreshed", updated_connection, true)
+      AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
       |> @repo.insert()
 
       {:ok, updated_connection}
@@ -149,7 +149,7 @@ defmodule Tango.Connection do
         {:ok, failed_connection} = record_refresh_failure(connection, reason)
 
         # Log failed refresh
-        AuditLog.log_connection_event("token_refresh_failed", failed_connection, false, %{
+        AuditLog.log_connection_event(:token_refresh_failed, failed_connection, false, %{
           reason: reason,
           attempts: failed_connection.refresh_attempts
         })
@@ -196,7 +196,7 @@ defmodule Tango.Connection do
 
     # Log batch refresh summary
     if success_count > 0 or failure_count > 0 do
-      AuditLog.log_system_event("batch_token_refresh", true, %{
+      AuditLog.log_system_event(:batch_token_refresh, true, %{
         success_count: success_count,
         failure_count: failure_count,
         total_processed: length(connections)
@@ -225,7 +225,7 @@ defmodule Tango.Connection do
       case @repo.update(changeset) do
         {:ok, revoked_connection} ->
           # Log connection revocation
-          AuditLog.log_connection_event("connection_revoked", revoked_connection, true)
+          AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
           |> @repo.insert()
 
           {:ok, revoked_connection}
@@ -256,7 +256,7 @@ defmodule Tango.Connection do
       |> @repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
     if count > 0 do
-      AuditLog.log_system_event("tenant_connections_revoked", true, %{
+      AuditLog.log_system_event(:tenant_connections_revoked, true, %{
         tenant_id: tenant_id,
         revoked_count: count
       })
@@ -287,7 +287,7 @@ defmodule Tango.Connection do
         |> @repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
       if count > 0 do
-        AuditLog.log_system_event("provider_connections_revoked", true, %{
+        AuditLog.log_system_event(:provider_connections_revoked, true, %{
           provider_name: provider_name,
           revoked_count: count
         })
@@ -321,7 +321,7 @@ defmodule Tango.Connection do
       |> @repo.delete_all()
 
     if count > 0 do
-      AuditLog.log_system_event("expired_connections_cleanup", true, %{
+      AuditLog.log_system_event(:expired_connections_cleanup, true, %{
         cleaned_count: count,
         cutoff_date: cleanup_cutoff
       })

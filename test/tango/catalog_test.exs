@@ -30,9 +30,9 @@ defmodule Tango.CatalogTest do
     {:ok, bypass: bypass}
   end
 
-  describe "fetch_catalog/0" do
+  describe "get_catalog/0" do
     test "returns complete provider catalog" do
-      assert {:ok, catalog} = Catalog.fetch_catalog()
+      assert {:ok, catalog} = Catalog.get_catalog()
 
       # Should be a map with string keys
       assert is_map(catalog)
@@ -56,7 +56,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "all providers have required fields" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       for {provider_name, config} <- catalog do
         # All providers should have display_name
@@ -93,7 +93,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "OAuth2 providers have required OAuth fields" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       oauth2_providers =
         catalog
@@ -127,7 +127,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "API_KEY providers typically do not have OAuth fields" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       api_key_providers =
         catalog
@@ -156,7 +156,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "provider categories are valid" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       # Valid categories based on common real-world categories
       valid_categories = [
@@ -189,7 +189,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "all URLs are properly formatted" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       url_fields = ["authorization_url", "token_url", "docs"]
 
@@ -222,7 +222,7 @@ defmodule Tango.CatalogTest do
         assert {:ok, config} = Catalog.get_provider(provider_name)
 
         # Should return the same config as in the full catalog
-        {:ok, full_catalog} = Catalog.fetch_catalog()
+        {:ok, full_catalog} = Catalog.get_catalog()
         expected_config = full_catalog[provider_name]
         assert config == expected_config
 
@@ -397,7 +397,7 @@ defmodule Tango.CatalogTest do
 
     test "suggestions are valid provider names" do
       # Test that all suggestions are actually valid providers from catalog
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
       valid_providers = Map.keys(catalog)
 
       test_inputs = ["git", "goo", "cal", "type", "not"]
@@ -457,8 +457,8 @@ defmodule Tango.CatalogTest do
   describe "catalog data integrity" do
     test "catalog is consistent across multiple calls" do
       # Test that the catalog doesn't change between calls
-      {:ok, catalog1} = Catalog.fetch_catalog()
-      {:ok, catalog2} = Catalog.fetch_catalog()
+      {:ok, catalog1} = Catalog.get_catalog()
+      {:ok, catalog2} = Catalog.get_catalog()
 
       assert catalog1 == catalog2
 
@@ -471,7 +471,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "provider names are URL-safe" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       for provider_name <- Map.keys(catalog) do
         # Provider names should be URL-safe (lowercase, no spaces, etc.)
@@ -484,7 +484,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "no duplicate display names" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       display_names =
         catalog
@@ -497,7 +497,7 @@ defmodule Tango.CatalogTest do
     end
 
     test "OAuth providers have valid domain structure" do
-      {:ok, catalog} = Catalog.fetch_catalog()
+      {:ok, catalog} = Catalog.get_catalog()
 
       oauth_providers =
         catalog
@@ -532,7 +532,7 @@ defmodule Tango.CatalogTest do
       CatalogMockServer.setup_catalog_endpoint(bypass, should_fail: true)
 
       # Should return error when catalog fetch fails
-      assert {:error, :catalog_fetch_failed} = Catalog.fetch_catalog()
+      assert {:error, :catalog_fetch_failed} = Catalog.get_catalog()
 
       # get_provider should propagate the error
       assert {:error, :catalog_fetch_failed} = Catalog.get_provider("github")

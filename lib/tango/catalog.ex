@@ -11,17 +11,17 @@ defmodule Tango.Catalog do
   @default_nango_providers_url "https://raw.githubusercontent.com/NangoHQ/nango/master/packages/providers/providers.yaml"
 
   @doc """
-  Fetches the complete Nango provider catalog from the official GitHub repository.
+  Gets the complete Nango provider catalog from the official GitHub repository.
 
   Returns a map of provider configurations parsed from the YAML file.
 
   ## Examples
 
-      iex> Tango.Catalog.fetch_catalog()
+      iex> Tango.Catalog.get_catalog()
       {:ok, %{"github" => %{...}, "google" => %{...}}}
 
   """
-  def fetch_catalog do
+  def get_catalog do
     case fetch_yaml_content() do
       {:ok, yaml_content} ->
         case parse_yaml_content(yaml_content) do
@@ -53,7 +53,7 @@ defmodule Tango.Catalog do
 
   """
   def get_provider(provider_name) do
-    case fetch_catalog() do
+    case get_catalog() do
       {:ok, catalog} ->
         case Map.get(catalog, provider_name) do
           nil -> {:error, :not_found}
@@ -77,7 +77,7 @@ defmodule Tango.Catalog do
 
   """
   def suggest_similar(input) do
-    case fetch_catalog() do
+    case get_catalog() do
       {:ok, catalog} ->
         catalog
         |> Map.keys()
@@ -97,7 +97,13 @@ defmodule Tango.Catalog do
   defp fetch_yaml_content do
     url = Application.get_env(:tango, :nango_providers_url, @default_nango_providers_url)
 
-    case Req.get(url) do
+    case Req.get(url,
+           retry: :safe_transient,
+           max_retries: 3,
+           retry_delay: 1000,
+           connect_options: [timeout: 10_000],
+           receive_timeout: 15_000
+         ) do
       {:ok, %{status: 200, body: body}} ->
         {:ok, body}
 

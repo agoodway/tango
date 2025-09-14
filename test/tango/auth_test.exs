@@ -24,15 +24,22 @@ defmodule Tango.AuthTest do
     end
   end
 
-  describe "exchange_code/3" do
+  describe "exchange_code/4" do
     test "validates parameters" do
-      assert_raise FunctionClauseError, fn ->
-        Tango.Auth.exchange_code(nil, "code", redirect_uri: "https://app.com/callback")
-      end
+      assert {:error, :invalid_state_parameter} =
+               Tango.Auth.exchange_code(nil, "code", "tenant-123",
+                 redirect_uri: "https://app.com/callback"
+               )
 
-      assert_raise FunctionClauseError, fn ->
-        Tango.Auth.exchange_code("state", nil, redirect_uri: "https://app.com/callback")
-      end
+      assert {:error, :invalid_authorization_code} =
+               Tango.Auth.exchange_code("state", nil, "tenant-123",
+                 redirect_uri: "https://app.com/callback"
+               )
+
+      assert {:error, :invalid_tenant_id} =
+               Tango.Auth.exchange_code("state", "code", nil,
+                 redirect_uri: "https://app.com/callback"
+               )
     end
   end
 end

@@ -54,12 +54,6 @@ defmodule Tango do
     Tango.Auth.exchange_code(state, code, tenant_id, opts)
   end
 
-  # Deprecated version for backward compatibility
-  def exchange_code(state, code, opts)
-      when is_binary(state) and is_binary(code) and is_list(opts) do
-    Tango.Auth.exchange_code(state, code, opts)
-  end
-
   @doc """
   Gets OAuth session by token.
 

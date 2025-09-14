@@ -311,7 +311,7 @@ defmodule Tango.Schemas.AuditLogTest do
       }
 
       changeset =
-        AuditLog.log_connection_status_change(connection, "active", :revoked, "user_request")
+        AuditLog.log_connection_status_change(connection, :active, :revoked, "user_request")
 
       assert changeset.valid?
       assert get_change(changeset, :event_type) == :connection_revoked
@@ -321,7 +321,7 @@ defmodule Tango.Schemas.AuditLogTest do
       assert get_change(changeset, :success) == true
 
       event_data = get_change(changeset, :event_data)
-      assert event_data.old_status == "active"
+      assert event_data.old_status == :active
       assert event_data.new_status == :revoked
       assert event_data.reason == "user_request"
       assert event_data.last_used_at == connection.last_used_at
@@ -335,7 +335,7 @@ defmodule Tango.Schemas.AuditLogTest do
         last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)
       }
 
-      changeset = AuditLog.log_connection_status_change(connection, "active", "expired")
+      changeset = AuditLog.log_connection_status_change(connection, :active, :expired)
 
       assert changeset.valid?
       assert get_change(changeset, :event_type) == :connection_expired
@@ -352,7 +352,7 @@ defmodule Tango.Schemas.AuditLogTest do
         last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)
       }
 
-      changeset = AuditLog.log_connection_status_change(connection, "active", "paused")
+      changeset = AuditLog.log_connection_status_change(connection, :active, :paused)
 
       # "connection_status_change" is not in the valid event types list, so this should fail validation
       refute changeset.valid?
@@ -371,7 +371,7 @@ defmodule Tango.Schemas.AuditLogTest do
 
       event_data = %{created_by: "admin", config_version: "v1"}
 
-      changeset = AuditLog.log_provider_event("provider_created", provider, true, event_data)
+      changeset = AuditLog.log_provider_event(:provider_created, provider, true, event_data)
 
       assert changeset.valid?
       assert get_change(changeset, :event_type) == :provider_created
@@ -393,7 +393,7 @@ defmodule Tango.Schemas.AuditLogTest do
       }
 
       # Valid provider event types
-      for event_type <- ["provider_created", "provider_updated", "provider_deleted"] do
+      for event_type <- [:provider_created, :provider_updated, :provider_deleted] do
         changeset = AuditLog.log_provider_event(event_type, provider, true)
         assert changeset.valid?, "Provider event #{event_type} should be valid"
       end

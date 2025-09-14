@@ -217,9 +217,11 @@ defmodule MyAppWeb.OAuthController do
   end
 
   def exchange_code(conn, %{"state" => state, "code" => code} = params) do
+    # Extract tenant_id from session or request context
+    tenant_id = get_tenant_id(conn)
     opts = [redirect_uri: params["redirect_uri"]]
 
-    case Tango.exchange_code(state, code, opts) do
+    case Tango.exchange_code(state, code, tenant_id, opts) do
       {:ok, connection} ->
         json(conn, %{
           provider: connection.provider.name,

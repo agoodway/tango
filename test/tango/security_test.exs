@@ -86,23 +86,6 @@ defmodule Tango.SecurityTest do
         |> Tango.TestRepo.insert()
       end
     end
-
-    test "deprecated exchange_code/3 warns about security vulnerability" do
-      import ExUnit.CaptureIO
-
-      # Create a session
-      {:ok, provider} = create_test_provider("test_provider")
-      {:ok, session} = Auth.create_session(provider.slug, "tenant-123")
-
-      # Call deprecated function and capture warning
-      warning =
-        capture_io(:stderr, fn ->
-          Auth.exchange_code(session.state, "auth_code", redirect_uri: "https://app.com/callback")
-        end)
-
-      assert warning =~ "SECURITY WARNING: exchange_code/3 is deprecated"
-      assert warning =~ "cross-tenant vulnerability"
-    end
   end
 
   describe "data sanitization in audit logging" do

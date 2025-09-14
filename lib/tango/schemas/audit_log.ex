@@ -152,14 +152,14 @@ defmodule Tango.Schemas.AuditLog do
   @doc "Logs token refresh attempt"
   def log_token_refresh(connection, success, error \\ nil, event_data \\ %{}) do
     attrs = %{
-      event_type: "token_refresh",
+      event_type: :token_refresh,
       tenant_id: connection.tenant_id,
       provider_id: connection.provider_id,
       connection_id: connection.id,
       success: success,
       error_code: error,
       occurred_at: DateTime.utc_now(),
-      metadata:
+      event_data:
         Map.merge(
           %{
             refresh_attempts: connection.refresh_attempts,
@@ -180,8 +180,8 @@ defmodule Tango.Schemas.AuditLog do
       event_type:
         case new_status do
           :revoked -> :connection_revoked
-          "expired" -> "connection_expired"
-          _ -> "connection_status_change"
+          :expired -> :connection_expired
+          _ -> :connection_status_change
         end,
       tenant_id: connection.tenant_id,
       provider_id: connection.provider_id,
@@ -202,7 +202,7 @@ defmodule Tango.Schemas.AuditLog do
 
   @doc "Logs provider configuration changes"
   def log_provider_event(event_type, provider, success, event_data \\ %{})
-      when event_type in ~w(provider_created provider_updated provider_deleted) do
+      when event_type in [:provider_created, :provider_updated, :provider_deleted] do
     attrs = %{
       event_type: event_type,
       # Provider changes are system-level
@@ -210,7 +210,7 @@ defmodule Tango.Schemas.AuditLog do
       provider_id: provider.id,
       success: success,
       occurred_at: DateTime.utc_now(),
-      metadata:
+      event_data:
         Map.merge(
           %{
             provider_name: provider.name,
@@ -227,7 +227,7 @@ defmodule Tango.Schemas.AuditLog do
   @doc "Logs session expiration cleanup"
   def log_session_cleanup(expired_count, tenant_id \\ "system") do
     attrs = %{
-      event_type: "session_expired",
+      event_type: :session_expired,
       tenant_id: tenant_id,
       success: true,
       occurred_at: DateTime.utc_now(),

@@ -179,20 +179,6 @@ defmodule Tango.Auth do
     end
   end
 
-  # DEPRECATED: Unsafe version - use exchange_code/4 with tenant_id
-  def exchange_code(state, authorization_code, opts)
-      when is_binary(state) and is_binary(authorization_code) and is_list(opts) do
-    IO.warn(
-      "SECURITY WARNING: exchange_code/3 is deprecated due to cross-tenant vulnerability. Use exchange_code/4 with tenant_id."
-    )
-
-    # For backward compatibility, try to extract session but this is still vulnerable
-    case @repo.get_by(OAuthSession, state: state) do
-      nil -> {:error, :session_not_found}
-      session -> exchange_code(state, authorization_code, session.tenant_id, opts)
-    end
-  end
-
   @doc """
   Gets a valid (non-expired) session by token.
 
