@@ -13,6 +13,11 @@ defmodule Tango.Auth do
 
   alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
 
+  @type session_result :: {:ok, OAuthSession.t()} | {:error, atom()}
+  @type connection_result :: {:ok, Connection.t()} | {:error, atom()}
+  @type auth_url_result :: {:ok, String.t()} | {:error, atom()}
+  @type cleanup_result :: {:ok, non_neg_integer()} | {:error, atom()}
+
   @doc """
   Creates a new OAuth session for provider and tenant.
 
@@ -27,22 +32,38 @@ defmodule Tango.Auth do
       {:error, :provider_not_found}
 
   """
+  @spec create_session(String.t(), String.t(), keyword()) :: session_result()
   def create_session(provider_name, tenant_id, opts \\ [])
       when is_binary(provider_name) and is_binary(tenant_id) do
-    with :ok <- Tango.Validation.validate_provider_slug(provider_name),
-         :ok <- Tango.Validation.validate_tenant_id(tenant_id),
-         {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
-         {:ok, provider} <- Tango.Provider.get_provider(provider_name),
-         changeset <- OAuthSession.create_session(provider.id, tenant_id, validated_opts),
-         {:ok, session} <- @repo.insert(changeset) do
-      # Log OAuth session start
+    # Use Ecto.Multi for atomic session creation and audit logging
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:validate, fn _repo, _changes ->
+      with :ok <- Tango.Validation.validate_provider_slug(provider_name),
+           :ok <- Tango.Validation.validate_tenant_id(tenant_id),
+           {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
+           {:ok, provider} <- Tango.Provider.get_provider(provider_name) do
+        changeset = OAuthSession.create_session(provider.id, tenant_id, validated_opts)
+        {:ok, %{provider: provider, changeset: changeset}}
+      else
+        {:error, :not_found} -> {:error, :provider_not_found}
+        error -> error
+      end
+    end)
+    |> Ecto.Multi.run(:create_session, fn repo, %{validate: %{changeset: changeset}} ->
+      repo.insert(changeset)
+    end)
+    |> Ecto.Multi.run(:audit_log, fn repo,
+                                     %{validate: %{provider: provider}, create_session: session} ->
       AuditLog.log_oauth_start(provider, tenant_id, session, opts)
-      |> @repo.insert()
+      |> repo.insert()
+    end)
+    |> @repo.transaction()
+    |> case do
+      {:ok, %{create_session: session}} ->
+        {:ok, session}
 
-      {:ok, session}
-    else
-      {:error, :not_found} -> {:error, :provider_not_found}
-      error -> error
+      {:error, _failed_operation, reason, _changes} ->
+        {:error, reason}
     end
   end
 
@@ -58,6 +79,7 @@ defmodule Tango.Auth do
       {:error, :session_not_found}
 
   """
+  @spec authorize_url(String.t(), keyword()) :: auth_url_result()
   def authorize_url(session_token, opts \\ []) when is_binary(session_token) do
     with {:ok, session} <- get_valid_session(session_token),
          {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
@@ -122,6 +144,7 @@ defmodule Tango.Auth do
 
   """
   # Handle invalid parameter types gracefully
+  @spec exchange_code(String.t(), String.t(), String.t(), keyword()) :: connection_result()
   def exchange_code(state, _authorization_code, _tenant_id, _opts)
       when not is_binary(state) do
     {:error, :invalid_state_parameter}
@@ -146,28 +169,62 @@ defmodule Tango.Auth do
   def exchange_code(state, authorization_code, tenant_id, opts)
       when is_binary(state) and is_binary(authorization_code) and is_binary(tenant_id) and
              is_list(opts) do
-    with :ok <- Tango.Validation.validate_state(state),
-         :ok <- Tango.Validation.validate_authorization_code(authorization_code),
-         :ok <- Tango.Validation.validate_tenant_id(tenant_id),
-         {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
-         {:ok, session} <- get_session_by_state(state, tenant_id),
-         :ok <- OAuthSession.validate_state(session, state),
-         :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]),
-         {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
-         {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
-         {:ok, token_response} <-
-           perform_token_exchange(oauth_config, session, authorization_code, validated_opts),
-         {:ok, connection} <-
-           create_connection_from_token(provider.id, session.tenant_id, token_response),
-         {:ok, _cleanup} <- cleanup_session(session) do
-      # Log successful token exchange (audit log handles its own sanitization)
+    # Use Ecto.Multi for atomic transaction management
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:validate, fn _repo, _changes ->
+      with :ok <- Tango.Validation.validate_state(state),
+           :ok <- Tango.Validation.validate_authorization_code(authorization_code),
+           :ok <- Tango.Validation.validate_tenant_id(tenant_id),
+           {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
+           {:ok, session} <- get_session_by_state(state, tenant_id),
+           :ok <- OAuthSession.validate_state(session, state),
+           :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]) do
+        {:ok, %{session: session, validated_opts: validated_opts}}
+      end
+    end)
+    |> Ecto.Multi.run(:exchange_token, fn _repo,
+                                          %{
+                                            validate: %{
+                                              session: session,
+                                              validated_opts: validated_opts
+                                            }
+                                          } ->
+      with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
+           {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
+           {:ok, token_response} <-
+             perform_token_exchange(oauth_config, session, authorization_code, validated_opts) do
+        {:ok, %{provider: provider, token_response: token_response}}
+      end
+    end)
+    |> Ecto.Multi.run(:create_connection, fn repo,
+                                             %{
+                                               validate: %{session: session},
+                                               exchange_token: %{
+                                                 provider: provider,
+                                                 token_response: token_response
+                                               }
+                                             } ->
+      # Atomic connection creation with revocation
+      create_connection_from_token_atomic(repo, provider.id, session.tenant_id, token_response)
+    end)
+    |> Ecto.Multi.run(:cleanup_session, fn repo, %{validate: %{session: session}} ->
+      repo.delete(session)
+    end)
+    |> Ecto.Multi.run(:audit_success, fn repo,
+                                         %{
+                                           validate: %{session: session},
+                                           create_connection: connection
+                                         } ->
       AuditLog.log_token_exchange(session, connection, true)
-      |> @repo.insert()
+      |> repo.insert()
+    end)
+    |> @repo.transaction()
+    |> case do
+      {:ok, %{create_connection: connection}} ->
+        {:ok, connection}
 
-      {:ok, connection}
-    else
-      {:error, reason} = error ->
-        # Log failed token exchange if session is available (audit log handles its own sanitization)
+      {:error, _failed_operation, reason, _changes} ->
+        # Log failed token exchange if session is available
         case get_session_by_state(state, tenant_id) do
           {:ok, session} ->
             AuditLog.log_token_exchange(session, nil, false, reason)
@@ -177,7 +234,7 @@ defmodule Tango.Auth do
             :ok
         end
 
-        error
+        {:error, reason}
     end
   end
 
@@ -193,6 +250,7 @@ defmodule Tango.Auth do
       {:error, :session_expired}
 
   """
+  @spec get_session(String.t()) :: session_result()
   def get_session(session_token) when is_binary(session_token) do
     with :ok <- Tango.Validation.validate_session_token(session_token) do
       get_valid_session(session_token)
@@ -210,6 +268,7 @@ defmodule Tango.Auth do
       {:ok, 5}  # 5 sessions cleaned up
 
   """
+  @spec cleanup_expired_sessions() :: cleanup_result()
   def cleanup_expired_sessions do
     # 24 hours ago
     expired_cutoff = DateTime.add(DateTime.utc_now(), -24 * 60 * 60, :second)
@@ -361,26 +420,20 @@ defmodule Tango.Auth do
     end
   end
 
-  defp create_connection_from_token(provider_id, tenant_id, token_response) do
-    # Revoke any existing active connections for this provider/tenant
-    revoke_existing_connections(provider_id, tenant_id)
+  # Atomic version for transaction usage
+  defp create_connection_from_token_atomic(repo, provider_id, tenant_id, token_response) do
+    # Revoke any existing active connections for this provider/tenant atomically
+    {_count, _} =
+      from(c in Connection,
+        where: c.provider_id == ^provider_id,
+        where: c.tenant_id == ^tenant_id,
+        where: c.status == :active
+      )
+      |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
     # Create new connection
     changeset = Connection.from_token_response(provider_id, tenant_id, token_response)
-    @repo.insert(changeset)
-  end
-
-  defp revoke_existing_connections(provider_id, tenant_id) do
-    from(c in Connection,
-      where: c.provider_id == ^provider_id,
-      where: c.tenant_id == ^tenant_id,
-      where: c.status == :active
-    )
-    |> @repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
-  end
-
-  defp cleanup_session(session) do
-    @repo.delete(session)
+    repo.insert(changeset)
   end
 
   # Update session with redirect_uri if not already set (for authorize_url flow)

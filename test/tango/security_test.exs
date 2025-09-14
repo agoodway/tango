@@ -8,7 +8,8 @@ defmodule Tango.SecurityTest do
 
   use Tango.DatabaseCase, async: true
 
-  alias Tango.{Audit.Sanitizer, Auth}
+  alias Ecto.Adapters.SQL.Sandbox
+  alias Tango.{Audit.Sanitizer, Auth, Factory, OAuthMockServer}
   alias Tango.Schemas.{Connection, OAuthSession, Provider}
 
   describe "cross-tenant session isolation" do
@@ -257,41 +258,53 @@ defmodule Tango.SecurityTest do
 
   describe "concurrent session handling" do
     setup do
-      {:ok, provider} = create_test_provider("github")
-      %{provider: provider}
+      bypass = Bypass.open()
+
+      # Setup mock OAuth endpoint
+      Bypass.stub(bypass, "POST", "/login/oauth/access_token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/x-www-form-urlencoded")
+        |> Plug.Conn.resp(
+          200,
+          "access_token=mock_access_token_12345&token_type=bearer&scope=repo%2Cuser"
+        )
+      end)
+
+      # Create provider with mock URLs
+      urls = OAuthMockServer.github_urls(bypass)
+      provider = Factory.create_github_provider("_security", urls: urls)
+
+      %{provider: provider, bypass: bypass}
     end
 
-    test "concurrent token exchanges with same session fail properly", %{provider: provider} do
+    test "token exchange with same session state cleanup prevents reuse", %{provider: provider} do
       tenant_id = "tenant-123"
       {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
-      # Simulate concurrent token exchange attempts
-      tasks =
-        for i <- 1..5 do
-          Task.async(fn ->
-            Auth.exchange_code(session.state, "auth_code_#{i}", tenant_id,
-              redirect_uri: "https://app.com/callback"
-            )
-          end)
-        end
+      # First token exchange should succeed
+      {:ok, _connection} =
+        Auth.exchange_code(session.state, "auth_code_1", tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
 
-      results = Task.await_many(tasks, 5000)
+      # Second token exchange with same state should fail (session cleaned up)
+      {:error, reason} =
+        Auth.exchange_code(session.state, "auth_code_2", tenant_id,
+          redirect_uri: "https://app.com/callback"
+        )
 
-      # At most one should succeed (due to session cleanup)
-      successful_results = Enum.filter(results, &match?({:ok, _}, &1))
-      failed_results = Enum.filter(results, &match?({:error, _}, &1))
-
-      assert length(successful_results) <= 1
-      assert length(failed_results) >= 4
+      assert reason == :session_not_found
     end
 
     test "concurrent session creation with same state should fail", %{provider: provider} do
       tenant_id = "tenant-123"
+      parent = self()
 
       # Try to create multiple sessions concurrently
       tasks =
         for _i <- 1..3 do
           Task.async(fn ->
+            :ok = Sandbox.allow(Tango.TestRepo, parent, self())
             Auth.create_session(provider.slug, tenant_id)
           end)
         end
