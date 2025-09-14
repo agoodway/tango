@@ -29,10 +29,6 @@ defmodule Tango.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # OAuth2 and HTTP client
-      {:oauth2, "~> 2.1"},
-      {:req, "~> 0.4"},
-
       # Database and encryption
       {:postgrex, "~> 0.17", optional: true},
       {:ecto, "~> 3.10"},
@@ -45,6 +41,10 @@ defmodule Tango.MixProject do
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.11"},
       {:uuid, "~> 1.1"},
+
+      # Clients and HTTP
+      {:oauth2, "~> 2.1"},
+      {:req, "~> 0.4"},
 
       # Utility libraries
       {:nimble_options, "~> 1.0"},

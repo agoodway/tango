@@ -155,8 +155,14 @@ defmodule Tango.IntegrationTest do
       assert get_field(refresh_changeset, :refresh_attempts) == 0
 
       # === STEP 7: Test Connection Lifecycle Management ===
-      # Test connection revocation
-      revoked_changeset = Connection.mark_expired(connection, "user_revoked")
+      # Test connection revocation using changeset directly
+      revoked_changeset =
+        Connection.changeset(connection, %{
+          status: :expired,
+          refresh_exhausted: true,
+          last_refresh_failure: "user_revoked"
+        })
+
       assert revoked_changeset.valid?
       assert get_change(revoked_changeset, :status) == :expired
       assert get_change(revoked_changeset, :refresh_exhausted) == true
@@ -215,11 +221,11 @@ defmodule Tango.IntegrationTest do
 
       # Test connection status change logging
       status_change_log =
-        AuditLog.log_connection_status_change(
+        AuditLog.log_connection_event(
+          :connection_expired,
           connection,
-          :active,
-          :expired,
-          "token_expired"
+          true,
+          %{old_status: :active, new_status: :expired, reason: "token_expired"}
         )
 
       assert status_change_log.valid?

@@ -289,42 +289,6 @@ defmodule Tango.Schemas.ConnectionTest do
     end
   end
 
-  describe "mark_expired/2" do
-    test "marks connection as expired with reason" do
-      connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        access_token: "token",
-        status: :active
-      }
-
-      reason = "Token revoked by user"
-
-      changeset = Connection.mark_expired(connection, reason)
-
-      assert changeset.valid?
-      assert get_change(changeset, :status) == :expired
-      assert get_change(changeset, :refresh_exhausted) == true
-      assert get_change(changeset, :last_refresh_failure) == reason
-    end
-
-    test "marks connection as expired without reason" do
-      connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        access_token: "token",
-        status: :active
-      }
-
-      changeset = Connection.mark_expired(connection)
-
-      assert changeset.valid?
-      assert get_change(changeset, :status) == :expired
-      assert get_change(changeset, :refresh_exhausted) == true
-      assert get_change(changeset, :last_refresh_failure) == nil
-    end
-  end
-
   describe "record_refresh_failure/2" do
     test "records first refresh failure" do
       connection = %Connection{

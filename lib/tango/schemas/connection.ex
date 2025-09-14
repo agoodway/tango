@@ -109,17 +109,6 @@ defmodule Tango.Schemas.Connection do
     changeset(connection, attrs)
   end
 
-  @doc "Marks connection as expired or failed"
-  def mark_expired(connection, reason \\ nil) do
-    attrs = %{
-      status: :expired,
-      refresh_exhausted: true,
-      last_refresh_failure: reason
-    }
-
-    changeset(connection, attrs)
-  end
-
   @doc "Records a failed refresh attempt"
   def record_refresh_failure(connection, error_reason) do
     attempts = connection.refresh_attempts + 1

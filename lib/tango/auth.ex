@@ -268,8 +268,7 @@ defmodule Tango.Auth do
   """
   @spec cleanup_expired_sessions() :: cleanup_result()
   def cleanup_expired_sessions do
-    # 24 hours ago
-    expired_cutoff = DateTime.add(DateTime.utc_now(), -24 * 60 * 60, :second)
+    expired_cutoff = session_cleanup_cutoff()
 
     {count, _} =
       from(s in OAuthSession, where: s.expires_at < ^expired_cutoff)
@@ -298,14 +297,12 @@ defmodule Tango.Auth do
   end
 
   defp get_session_by_state(state, tenant_id) do
-    # SECURITY FIX: Validate tenant ownership to prevent cross-tenant session hijacking
     case @repo.get_by(OAuthSession, state: state, tenant_id: tenant_id) do
       nil ->
         {:error, :session_not_found}
 
       session ->
-        # Check if session has expired
-        if session.expires_at && DateTime.compare(session.expires_at, DateTime.utc_now()) == :lt do
+        if session_expired?(session) do
           {:error, :session_expired}
         else
           {:ok, session}
@@ -313,34 +310,24 @@ defmodule Tango.Auth do
     end
   end
 
+  defp validate_access_token(""), do: {:error, :empty_access_token}
+
+  defp validate_access_token(access_token)
+       when is_binary(access_token) and byte_size(access_token) < 10 do
+    {:error, :token_too_short}
+  end
+
   defp validate_access_token(access_token) when is_binary(access_token) do
     cond do
-      # Check if it's empty or only whitespace
-      String.trim(access_token) == "" ->
-        {:error, :empty_access_token}
-
-      # Check if it looks like HTML content
-      String.contains?(access_token, ["<html>", "<HTML>", "<!DOCTYPE"]) ->
+      String.contains?(access_token, ["<html", "<HTML", "<!DOCTYPE", "<head", "<body"]) ->
         {:error, :invalid_token_format}
 
-      # Check if it looks like a JSON error response (only reject actual error responses)
-      String.starts_with?(String.trim(access_token), ["{", "["]) ->
-        case Jason.decode(access_token) do
-          {:ok, %{"error" => _}} -> {:error, :oauth_error_response}
-          # Allow other JSON responses in case OAuth2 library passes them
-          {:ok, _} -> :ok
-          # Not valid JSON, might be a valid token
-          {:error, _} -> :ok
-        end
-
-      # Check minimum length (most OAuth tokens are at least 20 characters)
-      String.length(access_token) < 10 ->
-        {:error, :token_too_short}
-
-      # Additional check for common invalid content (be more specific to avoid false positives)
       String.contains?(access_token, ["error=", "invalid_token", "unauthorized_client"]) and
-          String.length(access_token) < 100 ->
+          byte_size(access_token) < 100 ->
         {:error, :suspicious_token_content}
+
+      match?({:ok, %{"error" => _}}, Jason.decode(access_token)) ->
+        {:error, :oauth_error_response}
 
       true ->
         :ok
@@ -353,64 +340,43 @@ defmodule Tango.Auth do
   end
 
   defp perform_token_exchange(oauth_config, session, authorization_code, opts) do
-    redirect_uri = Keyword.get(opts, :redirect_uri)
-
-    # Build OAuth2 client
-    client =
-      OAuth2.Client.new(
-        client_id: oauth_config.client_id,
-        client_secret: oauth_config.client_secret,
-        token_url: oauth_config.token_url,
-        redirect_uri: redirect_uri
-      )
-
-    # Prepare token exchange parameters
-    token_params = [
-      code: authorization_code,
-      grant_type: "authorization_code"
-    ]
-
-    # Add PKCE verifier if used
-    token_params =
-      case session.code_verifier do
-        nil -> token_params
-        verifier -> Keyword.put(token_params, :code_verifier, verifier)
-      end
-
-    # Exchange code for tokens
-    case OAuth2.Client.get_token(client, token_params) do
-      {:ok, %{token: %OAuth2.AccessToken{} = token}} ->
-        # Validate that we received a proper access token, not malformed content
-        case validate_access_token(token.access_token) do
-          :ok ->
-            # Convert OAuth2.AccessToken to map for our schemas
-            token_response = %{
-              "access_token" => token.access_token,
-              "refresh_token" => token.refresh_token,
-              "token_type" => token.token_type,
-              "expires_in" =>
-                case token.expires_at do
-                  expires_at when is_integer(expires_at) ->
-                    calculate_expires_in_seconds(expires_at)
-
-                  _ ->
-                    nil
-                end,
-              "scope" => token.other_params["scope"]
-            }
-
-            {:ok, token_response}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, %OAuth2.Error{reason: reason}} ->
-        {:error, reason}
-
-      {:error, reason} ->
-        {:error, reason}
+    with client <- build_oauth_client(oauth_config, opts),
+         token_params <- build_token_params(authorization_code, session),
+         {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
+         :ok <- validate_access_token(token.access_token) do
+      {:ok, convert_token_to_response(token)}
+    else
+      {:error, %OAuth2.Error{reason: reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp build_oauth_client(oauth_config, opts) do
+    OAuth2.Client.new(
+      client_id: oauth_config.client_id,
+      client_secret: oauth_config.client_secret,
+      token_url: oauth_config.token_url,
+      redirect_uri: Keyword.get(opts, :redirect_uri)
+    )
+  end
+
+  defp build_token_params(authorization_code, session) do
+    base_params = [code: authorization_code, grant_type: "authorization_code"]
+
+    case session.code_verifier do
+      nil -> base_params
+      verifier -> Keyword.put(base_params, :code_verifier, verifier)
+    end
+  end
+
+  defp convert_token_to_response(token) do
+    %{
+      "access_token" => token.access_token,
+      "refresh_token" => token.refresh_token,
+      "token_type" => token.token_type,
+      "expires_in" => calculate_expires_in_seconds(token.expires_at),
+      "scope" => token.other_params["scope"]
+    }
   end
 
   # Atomic version for transaction usage
@@ -425,8 +391,8 @@ defmodule Tango.Auth do
       |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
     # Create new connection
-    changeset = Connection.from_token_response(provider_id, tenant_id, token_response)
-    repo.insert(changeset)
+    Connection.from_token_response(provider_id, tenant_id, token_response)
+    |> repo.insert()
   end
 
   # Update session with redirect_uri if not already set (for authorize_url flow)
@@ -477,5 +443,15 @@ defmodule Tango.Auth do
 
   defp calculate_expires_in_seconds(expires_at) when is_integer(expires_at) do
     DateTime.diff(DateTime.from_unix!(expires_at), DateTime.utc_now())
+  end
+
+  defp calculate_expires_in_seconds(_), do: nil
+
+  defp session_cleanup_cutoff do
+    DateTime.add(DateTime.utc_now(), -24 * 60 * 60, :second)
+  end
+
+  defp session_expired?(session) do
+    session.expires_at && DateTime.compare(session.expires_at, DateTime.utc_now()) == :lt
   end
 end

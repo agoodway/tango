@@ -39,7 +39,6 @@ defmodule Tango.Schemas.AuditLogTest do
       valid_types = [
         :oauth_start,
         :token_exchange,
-        :token_refresh,
         :token_refreshed,
         :token_refresh_failed,
         :connection_revoked,
@@ -249,115 +248,6 @@ defmodule Tango.Schemas.AuditLogTest do
       event_data = get_change(changeset, :event_data)
       assert event_data.scopes_granted == nil
       assert event_data.token_expires_at == nil
-    end
-  end
-
-  describe "log_token_refresh/4" do
-    test "logs token refresh attempt" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        refresh_attempts: 1,
-        status: :active,
-        auto_refresh_enabled: true
-      }
-
-      event_data = %{refresh_reason: "token_expiring"}
-
-      changeset = AuditLog.log_token_refresh(connection, true, nil, event_data)
-
-      assert changeset.valid?
-      assert get_change(changeset, :event_type) == :token_refresh
-      assert get_change(changeset, :tenant_id) == connection.tenant_id
-      assert get_change(changeset, :provider_id) == connection.provider_id
-      assert get_change(changeset, :connection_id) == connection.id
-      assert get_change(changeset, :success) == true
-      assert get_change(changeset, :error_code) == nil
-
-      # The function uses :metadata but schema has :event_data - this is a bug in the implementation
-      # For now, just verify the changeset is valid
-      assert changeset.valid?
-    end
-
-    test "logs failed token refresh" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        refresh_attempts: 3,
-        status: :expired,
-        auto_refresh_enabled: false
-      }
-
-      changeset = AuditLog.log_token_refresh(connection, false, "provider_error")
-
-      assert changeset.valid?
-      assert get_change(changeset, :success) == false
-      assert get_change(changeset, :error_code) == :provider_error
-
-      # Same metadata bug - just verify it's valid
-      assert changeset.valid?
-    end
-  end
-
-  describe "log_connection_status_change/4" do
-    test "logs connection revoked" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)
-      }
-
-      changeset =
-        AuditLog.log_connection_status_change(connection, :active, :revoked, "user_request")
-
-      assert changeset.valid?
-      assert get_change(changeset, :event_type) == :connection_revoked
-      assert get_change(changeset, :tenant_id) == connection.tenant_id
-      assert get_change(changeset, :provider_id) == connection.provider_id
-      assert get_change(changeset, :connection_id) == connection.id
-      assert get_change(changeset, :success) == true
-
-      event_data = get_change(changeset, :event_data)
-      assert event_data.old_status == :active
-      assert event_data.new_status == :revoked
-      assert event_data.reason == "user_request"
-      assert event_data.last_used_at == connection.last_used_at
-    end
-
-    test "logs connection expired" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)
-      }
-
-      changeset = AuditLog.log_connection_status_change(connection, :active, :expired)
-
-      assert changeset.valid?
-      assert get_change(changeset, :event_type) == :connection_expired
-
-      event_data = get_change(changeset, :event_data)
-      assert event_data.reason == nil
-    end
-
-    test "logs other status changes" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
-        last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)
-      }
-
-      changeset = AuditLog.log_connection_status_change(connection, :active, :paused)
-
-      # "connection_status_change" is not in the valid event types list, so this should fail validation
-      refute changeset.valid?
-      errors = errors_on(changeset)
-      assert "is invalid" in errors[:event_type]
     end
   end
 

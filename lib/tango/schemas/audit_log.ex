@@ -35,7 +35,6 @@ defmodule Tango.Schemas.AuditLog do
       values: [
         :oauth_start,
         :token_exchange,
-        :token_refresh,
         :token_refreshed,
         :token_refresh_failed,
         :connection_revoked,
@@ -149,57 +148,6 @@ defmodule Tango.Schemas.AuditLog do
     |> changeset(attrs)
   end
 
-  @doc "Logs token refresh attempt"
-  def log_token_refresh(connection, success, error \\ nil, event_data \\ %{}) do
-    attrs = %{
-      event_type: :token_refresh,
-      tenant_id: connection.tenant_id,
-      provider_id: connection.provider_id,
-      connection_id: connection.id,
-      success: success,
-      error_code: error,
-      occurred_at: DateTime.utc_now(),
-      event_data:
-        Map.merge(
-          %{
-            refresh_attempts: connection.refresh_attempts,
-            was_expired: connection.status == :expired,
-            auto_refresh_enabled: connection.auto_refresh_enabled
-          },
-          event_data
-        )
-    }
-
-    %__MODULE__{}
-    |> changeset(attrs)
-  end
-
-  @doc "Logs connection status change"
-  def log_connection_status_change(connection, old_status, new_status, reason \\ nil) do
-    attrs = %{
-      event_type:
-        case new_status do
-          :revoked -> :connection_revoked
-          :expired -> :connection_expired
-          _ -> :connection_status_change
-        end,
-      tenant_id: connection.tenant_id,
-      provider_id: connection.provider_id,
-      connection_id: connection.id,
-      success: true,
-      occurred_at: DateTime.utc_now(),
-      event_data: %{
-        old_status: old_status,
-        new_status: new_status,
-        reason: reason,
-        last_used_at: connection.last_used_at
-      }
-    }
-
-    %__MODULE__{}
-    |> changeset(attrs)
-  end
-
   @doc "Logs provider configuration changes"
   def log_provider_event(event_type, provider, success, event_data \\ %{})
       when event_type in [:provider_created, :provider_updated, :provider_deleted] do
@@ -301,13 +249,15 @@ defmodule Tango.Schemas.AuditLog do
 
   defp calculate_session_duration(%{inserted_at: start_time})
        when is_struct(start_time, NaiveDateTime) do
-    start_time_utc = DateTime.from_naive!(start_time, "Etc/UTC")
-    DateTime.diff(DateTime.utc_now(), start_time_utc, :millisecond)
+    start_time
+    |> DateTime.from_naive!("Etc/UTC")
+    |> then(&DateTime.diff(DateTime.utc_now(), &1, :millisecond))
   end
 
   defp calculate_session_duration(%{inserted_at: start_time})
        when is_struct(start_time, DateTime) do
-    DateTime.diff(DateTime.utc_now(), start_time, :millisecond)
+    start_time
+    |> then(&DateTime.diff(DateTime.utc_now(), &1, :millisecond))
   end
 
   defp calculate_session_duration(_), do: nil
