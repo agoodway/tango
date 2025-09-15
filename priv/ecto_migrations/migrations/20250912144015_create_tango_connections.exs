@@ -15,11 +15,11 @@ defmodule Tango.Migrations.CreateTangoConnections do
       add :granted_scopes, {:array, :string}, default: []
       add :raw_payload, :map, default: %{}
       add :metadata, :map, default: %{}
-      
+
       # Connection status and lifecycle
       add :status, :string, default: "active", null: false
       add :last_used_at, :utc_datetime
-      
+
       # Token refresh management
       add :refresh_attempts, :integer, default: 0, null: false
       add :last_refresh_failure, :text
@@ -31,13 +31,16 @@ defmodule Tango.Migrations.CreateTangoConnections do
       timestamps()
     end
 
-    create index(:tango_connections, [:provider_id], prefix: prefix)
+    # Tenant-first indexes for multi-tenant security and performance
     create index(:tango_connections, [:tenant_id], prefix: prefix)
-    create index(:tango_connections, [:status], prefix: prefix)
-    create index(:tango_connections, [:expires_at], prefix: prefix)
-    create index(:tango_connections, [:last_used_at], prefix: prefix)
-    create index(:tango_connections, [:status, :expires_at], prefix: prefix)
-    create unique_index(:tango_connections, [:provider_id, :tenant_id], 
+    create index(:tango_connections, [:tenant_id, :provider_id], prefix: prefix)
+    create index(:tango_connections, [:tenant_id, :status], prefix: prefix)
+    create index(:tango_connections, [:tenant_id, :expires_at], prefix: prefix)
+    create index(:tango_connections, [:tenant_id, :last_used_at], prefix: prefix)
+    create index(:tango_connections, [:tenant_id, :status, :expires_at], prefix: prefix)
+
+    # Unique constraint for active connections (provider_id first for existing constraint)
+    create unique_index(:tango_connections, [:provider_id, :tenant_id],
                         where: "status = 'active'", prefix: prefix)
   end
 end

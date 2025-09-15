@@ -347,35 +347,51 @@ defmodule Tango.Connection do
 
   """
   def get_connection_stats(tenant_id) when is_binary(tenant_id) do
-    stats_query =
+    # Use CTEs for better performance - single query instead of two separate ones
+    status_counts_cte =
       from(c in Connection,
         where: c.tenant_id == ^tenant_id,
         group_by: c.status,
-        select: {c.status, count(c.id)}
+        select: %{status: c.status, count: count(c.id)}
       )
 
-    provider_query =
+    active_providers_cte =
       from(c in Connection,
         join: p in assoc(c, :provider),
         where: c.tenant_id == ^tenant_id,
         where: c.status == :active,
         distinct: p.name,
-        select: p.name
+        select: %{name: p.name}
       )
 
-    status_counts =
-      @repo.all(stats_query)
-      |> Enum.into(%{})
+    # Main query using both CTEs
+    query =
+      from(c in Connection)
+      |> with_cte("status_counts", as: ^status_counts_cte)
+      |> with_cte("active_providers", as: ^active_providers_cte)
+      |> select([c], %{
+        status_counts: fragment("(SELECT json_object_agg(status, count) FROM status_counts)"),
+        providers: fragment("(SELECT json_agg(name ORDER BY name) FROM active_providers)")
+      })
+      |> limit(1)
 
-    providers = @repo.all(provider_query)
+    case @repo.one(query) do
+      %{status_counts: status_counts, providers: providers} ->
+        status_counts = status_counts || %{}
+        providers = providers || []
 
-    %{
-      active: Map.get(status_counts, :active, 0),
-      expired: Map.get(status_counts, :expired, 0),
-      revoked: Map.get(status_counts, :revoked, 0),
-      total: Map.values(status_counts) |> Enum.sum(),
-      providers: providers
-    }
+        %{
+          active: Map.get(status_counts, "active", 0),
+          expired: Map.get(status_counts, "expired", 0),
+          revoked: Map.get(status_counts, "revoked", 0),
+          total: Map.values(status_counts) |> Enum.sum(),
+          providers: providers
+        }
+
+      nil ->
+        # Empty result fallback
+        %{active: 0, expired: 0, revoked: 0, total: 0, providers: []}
+    end
   end
 
   defp validate_refresh_eligibility(%Connection{} = connection) do

@@ -524,6 +524,55 @@ defmodule Tango.ConnectionTest do
       assert stats.total == 0
       assert stats.providers == []
     end
+
+    test "CTE-optimized stats query produces consistent results with complex data" do
+      provider1 = Factory.create_github_provider("_cte_test1")
+      provider2 = Factory.create_github_provider("_cte_test2")
+      provider3 = Factory.create_github_provider("_cte_test3")
+      provider4 = Factory.create_github_provider("_cte_test4")
+      provider5 = Factory.create_github_provider("_cte_test5")
+      tenant_id = "tenant_cte_optimization_test"
+      other_tenant = "other_tenant_cte_test"
+
+      # Create active connections (one per provider due to unique constraint)
+      _active1 = Factory.create_github_connection(provider1, tenant_id, "_cte_active1")
+      _active2 = Factory.create_github_connection(provider2, tenant_id, "_cte_active2")
+      _active3 = Factory.create_github_connection(provider3, tenant_id, "_cte_active3")
+
+      # Create revoked connection (different provider to avoid constraint)
+      revoked_conn = Factory.create_github_connection(provider4, tenant_id, "_cte_revoked")
+      revoked_changeset = ConnectionSchema.changeset(revoked_conn, %{status: :revoked})
+      {:ok, _} = Repo.update(revoked_changeset)
+
+      # Create expired connection (different provider to avoid constraint)
+      expired_conn = Factory.create_github_connection(provider5, tenant_id, "_cte_expired")
+      expired_changeset = ConnectionSchema.changeset(expired_conn, %{status: :expired})
+      {:ok, _} = Repo.update(expired_changeset)
+
+      # Create connection for other tenant (should be excluded)
+      _other_conn = Factory.create_github_connection(provider1, other_tenant, "_cte_other")
+
+      # Get stats using CTE-optimized query
+      stats = Tango.Connection.get_connection_stats(tenant_id)
+
+      # Verify comprehensive results
+      assert stats.active == 3
+      assert stats.revoked == 1
+      assert stats.expired == 1
+      assert stats.total == 5
+
+      # Verify provider list contains only providers with active connections
+      assert length(stats.providers) == 3
+      assert provider1.name in stats.providers
+      assert provider2.name in stats.providers
+      assert provider3.name in stats.providers
+
+      # Verify tenant isolation - other tenant's connection not included
+      other_stats = Tango.Connection.get_connection_stats(other_tenant)
+      assert other_stats.active == 1
+      assert other_stats.total == 1
+      assert other_stats.providers == [provider1.name]
+    end
   end
 
   describe "error handling and edge cases" do

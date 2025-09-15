@@ -19,7 +19,7 @@ config :tango, Tango.TestRepo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10,
   log: false,
-  priv: "priv/repo"
+  priv: "priv/ecto_migrations"
 
 # Cloak configuration for encryption in tests
 config :cloak, Tango.Vault,

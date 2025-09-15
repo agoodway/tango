@@ -26,5 +26,9 @@ defmodule Tango.Migrations.CreateTangoAuditLogs do
     create index(:tango_audit_logs, [:tenant_id], prefix: prefix)
     create index(:tango_audit_logs, [:event_type], prefix: prefix)
     create index(:tango_audit_logs, [:occurred_at], prefix: prefix)
+
+    # Composite indexes for common query patterns
+    create index(:tango_audit_logs, [:tenant_id, :event_type, :occurred_at], prefix: prefix)
+    create index(:tango_audit_logs, [:tenant_id, :provider_id, :occurred_at], prefix: prefix)
   end
 end
