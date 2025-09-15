@@ -6,7 +6,7 @@ defmodule Tango.Schemas.ConnectionTest do
   describe "changeset/2" do
     test "valid changeset with required fields" do
       attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "access_token_123",
         status: :active
@@ -30,7 +30,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "validates status inclusion" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token_123"
       }
@@ -49,7 +49,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "validates token_type inclusion" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token_123",
         status: :active
@@ -71,7 +71,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "validates refresh_attempts must be non-negative" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token_123",
         status: :active
@@ -92,7 +92,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "normalizes token_type" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token_123",
         status: :active
@@ -130,7 +130,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
   describe "from_token_response/3" do
     test "creates connection from complete OAuth token response" do
-      provider_id = "550e8400-e29b-41d4-a716-446655440000"
+      provider = Tango.Factory.create_provider()
       tenant_id = "user-123"
 
       token_response = %{
@@ -141,10 +141,10 @@ defmodule Tango.Schemas.ConnectionTest do
         "scope" => "read write user:email"
       }
 
-      changeset = Connection.from_token_response(provider_id, tenant_id, token_response)
+      changeset = Connection.from_token_response(provider.id, tenant_id, token_response)
 
       assert changeset.valid?
-      assert get_change(changeset, :provider_id) == provider_id
+      assert get_change(changeset, :provider_id) == provider.id
       assert get_change(changeset, :tenant_id) == tenant_id
       assert get_change(changeset, :access_token) == "access_token_abc123"
       assert get_change(changeset, :refresh_token) == "refresh_token_def456"
@@ -168,14 +168,14 @@ defmodule Tango.Schemas.ConnectionTest do
     end
 
     test "handles minimal token response" do
-      provider_id = "550e8400-e29b-41d4-a716-446655440000"
+      provider = Tango.Factory.create_provider()
       tenant_id = "user-123"
 
       token_response = %{
         "access_token" => "access_token_only"
       }
 
-      changeset = Connection.from_token_response(provider_id, tenant_id, token_response)
+      changeset = Connection.from_token_response(provider.id, tenant_id, token_response)
 
       assert changeset.valid?
       assert get_change(changeset, :access_token) == "access_token_only"
@@ -212,7 +212,7 @@ defmodule Tango.Schemas.ConnectionTest do
   describe "refresh_changeset/2" do
     test "updates connection with new tokens" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "old_token",
         status: :active,
@@ -256,7 +256,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "preserves existing refresh_token when not provided" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token",
         status: :active,
@@ -276,7 +276,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "preserves existing scopes when not provided" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token",
         status: :active,
@@ -299,7 +299,7 @@ defmodule Tango.Schemas.ConnectionTest do
   describe "record_refresh_failure/2" do
     test "records first refresh failure" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token",
         status: :active,
@@ -321,7 +321,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "marks as exhausted after max attempts" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token",
         status: :active,
@@ -341,7 +341,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
     test "converts error reason to string" do
       connection = %Connection{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         access_token: "token",
         status: :active,

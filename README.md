@@ -91,9 +91,27 @@ config :tango,
   api_key: System.get_env("TANGO_API_KEY")
 ```
 
-Run migrations:
+Generate and run the Tango migration:
 
 ```bash
+# Generate migration file
+mix ecto.gen.migration add_tango_tables
+
+# Edit the generated migration file to call Tango.Migration:
+# priv/repo/migrations/YYYYMMDDHHMMSS_add_tango_tables.exs
+defmodule MyApp.Repo.Migrations.AddTangoTables do
+  use Ecto.Migration
+
+  def up do
+    Tango.Migration.up()
+  end
+
+  def down do
+    Tango.Migration.down()
+  end
+end
+
+# Run migrations
 mix ecto.migrate
 ```
 

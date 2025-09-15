@@ -1,7 +1,7 @@
 defmodule Tango.Schemas.AuditLogTest do
   use Tango.DatabaseCase, async: true
 
-  alias Tango.Schemas.{AuditLog, Connection, OAuthSession, Provider}
+  alias Tango.Schemas.{AuditLog, OAuthSession, Provider}
 
   describe "changeset/2" do
     test "valid changeset with required fields" do
@@ -134,7 +134,7 @@ defmodule Tango.Schemas.AuditLogTest do
   describe "log_oauth_start/4" do
     test "creates OAuth start event log" do
       provider = %Provider{
-        id: "550e8400-e29b-41d4-a716-446655440000",
+        id: 1,
         name: "GitHub",
         default_scopes: ["user:email"]
       }
@@ -178,7 +178,7 @@ defmodule Tango.Schemas.AuditLogTest do
 
     test "uses provider default scopes when not specified" do
       provider = %Provider{
-        id: "550e8400-e29b-41d4-a716-446655440000",
+        id: 1,
         name: "GitHub",
         default_scopes: ["user:email", "repo"]
       }
@@ -197,19 +197,15 @@ defmodule Tango.Schemas.AuditLogTest do
 
   describe "log_token_exchange/4" do
     test "logs successful token exchange" do
+      provider = Tango.Factory.create_provider()
+      connection = Tango.Factory.create_connection(provider, "user-123")
+
       session = %OAuthSession{
         tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: provider.id,
         session_token: "session_token_123",
         # 5 minutes ago
         inserted_at: DateTime.add(DateTime.utc_now(), -300, :second)
-      }
-
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        granted_scopes: ["read", "write"],
-        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
-        token_type: :bearer
       }
 
       changeset = AuditLog.log_token_exchange(session, connection, true)
@@ -224,7 +220,7 @@ defmodule Tango.Schemas.AuditLogTest do
       assert get_change(changeset, :error_code) == nil
 
       event_data = get_change(changeset, :event_data)
-      assert event_data.scopes_granted == ["read", "write"]
+      assert event_data.scopes_granted == connection.granted_scopes
       assert event_data.token_expires_at == connection.expires_at
       assert event_data.token_type == :bearer
       assert is_integer(event_data.session_duration_ms)
@@ -234,7 +230,7 @@ defmodule Tango.Schemas.AuditLogTest do
     test "logs failed token exchange" do
       session = %OAuthSession{
         tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         session_token: "session_token_123"
       }
 
@@ -254,7 +250,7 @@ defmodule Tango.Schemas.AuditLogTest do
   describe "log_provider_event/4" do
     test "logs provider creation" do
       provider = %Provider{
-        id: "550e8400-e29b-41d4-a716-446655440000",
+        id: 1,
         name: "GitHub",
         active: true
       }
@@ -277,7 +273,7 @@ defmodule Tango.Schemas.AuditLogTest do
 
     test "validates event_type for provider events" do
       provider = %Provider{
-        id: "550e8400-e29b-41d4-a716-446655440000",
+        id: 1,
         name: "GitHub",
         active: true
       }
@@ -317,11 +313,8 @@ defmodule Tango.Schemas.AuditLogTest do
 
   describe "log_connection_event/4" do
     test "logs generic connection event" do
-      connection = %Connection{
-        id: "660e8400-e29b-41d4-a716-446655440000",
-        tenant_id: "user-123",
-        provider_id: "550e8400-e29b-41d4-a716-446655440000"
-      }
+      provider = Tango.Factory.create_provider()
+      connection = Tango.Factory.create_connection(provider, "user-123")
 
       event_data = %{action: "manual_refresh", triggered_by: "user"}
 

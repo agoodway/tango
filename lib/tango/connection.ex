@@ -63,7 +63,7 @@ defmodule Tango.Connection do
 
   """
   def get_connection(connection_id, tenant_id)
-      when is_binary(connection_id) and is_binary(tenant_id) do
+      when is_integer(connection_id) and is_binary(tenant_id) do
     case @repo.get_by(Connection, id: connection_id, tenant_id: tenant_id) do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}

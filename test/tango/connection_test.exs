@@ -102,8 +102,8 @@ defmodule Tango.ConnectionTest do
       assert {:error, :not_found} = Tango.Connection.get_connection(conn.id, other_tenant)
 
       # Should not retrieve non-existent connection (use proper UUID format)
-      fake_uuid = Ecto.UUID.generate()
-      assert {:error, :not_found} = Tango.Connection.get_connection(fake_uuid, tenant_id)
+      fake_id = 999_999
+      assert {:error, :not_found} = Tango.Connection.get_connection(fake_id, tenant_id)
     end
   end
 

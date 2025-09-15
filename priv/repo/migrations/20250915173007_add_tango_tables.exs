@@ -2,10 +2,10 @@ defmodule Tango.TestRepo.Migrations.AddTangoTables do
   use Ecto.Migration
 
   def up do
-    Tango.Migrations.up()
+    Tango.Migration.up()
   end
 
   def down do
-    Tango.Migrations.down()
+    Tango.Migration.down()
   end
 end

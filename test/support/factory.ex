@@ -302,7 +302,7 @@ defmodule Tango.Factory do
       user_id: user_id,
       action: "test_action_#{unique_id}",
       resource_type: "test_resource",
-      resource_id: Ecto.UUID.generate(),
+      resource_id: "resource_#{unique_id}",
       metadata: %{"test" => "data"}
     }
 

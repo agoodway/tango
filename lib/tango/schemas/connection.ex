@@ -9,8 +9,8 @@ defmodule Tango.Schemas.Connection do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @primary_key {:id, :binary_id, autogenerate: true}
-  @foreign_key_type :binary_id
+  @primary_key {:id, :id, autogenerate: true}
+  @foreign_key_type :id
   @schema_prefix Application.compile_env(:tango, :schema_prefix, nil)
 
   @fields [

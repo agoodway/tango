@@ -128,7 +128,7 @@ defmodule Tango.ProviderTest do
     end
 
     test "returns error when ID not found" do
-      fake_id = Ecto.UUID.generate()
+      fake_id = 999_999
       assert {:error, :not_found} = Provider.get_provider_by_id(fake_id)
     end
 

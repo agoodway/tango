@@ -1,26 +1,12 @@
-defmodule Tango.Migrations do
+defmodule Tango.Migrations.V01 do
   @moduledoc """
-  Manages database migrations for Tango.
+  Tango V01 Migration - Initial schema setup.
 
-  ## Usage
-
-  In your Phoenix application, create a migration:
-
-      mix ecto.gen.migration add_tango_tables
-
-  Then in the generated migration file:
-
-      defmodule MyApp.Repo.Migrations.AddTangoTables do
-        use Ecto.Migration
-
-        def up do
-          Tango.Migrations.up()
-        end
-
-        def down do
-          Tango.Migrations.down()
-        end
-      end
+  Creates core tables:
+  - tango_providers
+  - tango_oauth_sessions
+  - tango_connections
+  - tango_audit_logs
   """
 
   use Ecto.Migration
@@ -34,8 +20,7 @@ defmodule Tango.Migrations do
     end
 
     # Providers table
-    create table(:tango_providers, primary_key: false, prefix: prefix) do
-      add(:id, :uuid, primary_key: true, default: fragment("gen_random_uuid()"))
+    create table(:tango_providers, prefix: prefix) do
       add(:slug, :string, null: false)
       add(:name, :string, null: false)
       add(:config, :map, default: %{})
@@ -51,12 +36,8 @@ defmodule Tango.Migrations do
     create(index(:tango_providers, [:active], prefix: prefix))
 
     # OAuth sessions table
-    create table(:tango_oauth_sessions, primary_key: false, prefix: prefix) do
-      add(:id, :uuid, primary_key: true, default: fragment("gen_random_uuid()"))
-
-      add(:provider_id, references(:tango_providers, type: :uuid, on_delete: :delete_all),
-        null: false
-      )
+    create table(:tango_oauth_sessions, prefix: prefix) do
+      add(:provider_id, references(:tango_providers, on_delete: :delete_all), null: false)
 
       add(:tenant_id, :string, null: false)
       add(:session_token, :string, null: false)
@@ -79,12 +60,8 @@ defmodule Tango.Migrations do
     create(index(:tango_oauth_sessions, [:expires_at, :tenant_id], prefix: prefix))
 
     # Connections table
-    create table(:tango_connections, primary_key: false, prefix: prefix) do
-      add(:id, :uuid, primary_key: true, default: fragment("gen_random_uuid()"))
-
-      add(:provider_id, references(:tango_providers, type: :uuid, on_delete: :delete_all),
-        null: false
-      )
+    create table(:tango_connections, prefix: prefix) do
+      add(:provider_id, references(:tango_providers, on_delete: :delete_all), null: false)
 
       add(:tenant_id, :string, null: false)
       add(:access_token, :binary, null: false)
@@ -121,10 +98,9 @@ defmodule Tango.Migrations do
     )
 
     # Audit logs table
-    create table(:tango_audit_logs, primary_key: false, prefix: prefix) do
-      add(:id, :uuid, primary_key: true, default: fragment("gen_random_uuid()"))
-      add(:provider_id, references(:tango_providers, type: :uuid, on_delete: :delete_all))
-      add(:connection_id, references(:tango_connections, type: :uuid, on_delete: :delete_all))
+    create table(:tango_audit_logs, prefix: prefix) do
+      add(:provider_id, references(:tango_providers, on_delete: :delete_all))
+      add(:connection_id, references(:tango_connections, on_delete: :delete_all))
       add(:session_id, :string)
       add(:tenant_id, :string, null: false)
       add(:event_type, :string, null: false)

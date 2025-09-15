@@ -6,7 +6,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
   describe "changeset/2" do
     test "valid changeset with required fields" do
       attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         session_token: String.duplicate("a", 32),
         state: String.duplicate("b", 32),
@@ -32,7 +32,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
 
     test "validates session_token length" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         state: String.duplicate("b", 32),
         expires_at: DateTime.add(DateTime.utc_now(), 3600, :second)
@@ -50,7 +50,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
 
     test "validates state length" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         session_token: String.duplicate("a", 32),
         expires_at: DateTime.add(DateTime.utc_now(), 3600, :second)
@@ -68,7 +68,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
 
     test "validates code_verifier length" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         session_token: String.duplicate("a", 32),
         state: String.duplicate("b", 32),
@@ -102,7 +102,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
 
     test "validates expires_at must be in future" do
       base_attrs = %{
-        provider_id: "550e8400-e29b-41d4-a716-446655440000",
+        provider_id: 1,
         tenant_id: "user-123",
         session_token: String.duplicate("a", 32),
         state: String.duplicate("b", 32)
@@ -136,7 +136,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
 
   describe "create_session/3" do
     test "creates valid session changeset" do
-      provider_id = "550e8400-e29b-41d4-a716-446655440000"
+      provider_id = 1
       tenant_id = "user-123"
 
       changeset = OAuthSession.create_session(provider_id, tenant_id)
@@ -160,7 +160,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
     end
 
     test "creates session with metadata from options" do
-      provider_id = "550e8400-e29b-41d4-a716-446655440000"
+      provider_id = 1
       tenant_id = "user-123"
       opts = [scopes: ["read", "write"], redirect_uri: "https://example.com/callback"]
 
@@ -173,7 +173,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
     end
 
     test "generates unique tokens for different sessions" do
-      provider_id = "550e8400-e29b-41d4-a716-446655440000"
+      provider_id = 1
 
       changeset1 = OAuthSession.create_session(provider_id, "user-1")
       changeset2 = OAuthSession.create_session(provider_id, "user-2")
