@@ -1,8 +1,6 @@
 defmodule Tango.TestRepo do
   @moduledoc """
   Test repository for Tango library testing.
-
-  Uses standard Ecto migrations from priv/repo/migrations.
   """
 
   use Ecto.Repo,

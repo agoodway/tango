@@ -34,7 +34,6 @@ defmodule Tango.MixProject do
       {:ecto, "~> 3.10"},
       {:ecto_sql, "~> 3.10"},
       {:cloak_ecto, "~> 1.3"},
-      {:ecto_dep_migrations, github: "agoodway/ecto_dep_migrations", depth: 1},
       {:plug, "~> 1.15"},
 
       # JSON, YAML, and UUID
