@@ -74,18 +74,10 @@ defmodule Mix.Tasks.Tango.Providers.Create do
 
           case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
             {:ok, provider} ->
-              Shell.info("✅ Created #{provider.name} provider")
-              Shell.info("   Display Name: #{provider.display_name}")
-              Shell.info("   Status: #{if provider.active, do: "Active", else: "Inactive"}")
-              Shell.info("   Auth Mode: OAuth2")
-
-              if provider.default_scopes && length(provider.default_scopes) > 0 do
-                Shell.info("   Default Scopes: #{Enum.join(provider.default_scopes, ", ")}")
-              end
+              ProviderHelper.display_provider_success(provider, "OAuth2")
 
             {:error, changeset} ->
-              Shell.error("❌ Failed to create provider:")
-              print_changeset_errors(changeset)
+              ProviderHelper.display_creation_error(changeset)
           end
         end
 
@@ -125,14 +117,10 @@ defmodule Mix.Tasks.Tango.Providers.Create do
 
           case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
             {:ok, provider} ->
-              Shell.info("✅ Created #{provider.name} provider")
-              Shell.info("   Display Name: #{provider.display_name}")
-              Shell.info("   Status: #{if provider.active, do: "Active", else: "Inactive"}")
-              Shell.info("   Auth Mode: API Key")
+              ProviderHelper.display_provider_success(provider, "API Key")
 
             {:error, changeset} ->
-              Shell.error("❌ Failed to create provider:")
-              print_changeset_errors(changeset)
+              ProviderHelper.display_creation_error(changeset)
           end
         end
 
@@ -151,28 +139,14 @@ defmodule Mix.Tasks.Tango.Providers.Create do
 
         case Tango.Provider.create_provider(config) do
           {:ok, provider} ->
-            Shell.info("✅ Created #{provider.name} API key provider")
-            Shell.info("   Display Name: #{provider.display_name}")
-            Shell.info("   Status: #{if provider.active, do: "Active", else: "Inactive"}")
+            ProviderHelper.display_provider_success(provider, "API Key (Simple)")
 
           {:error, changeset} ->
-            Shell.error("❌ Failed to create provider:")
-            print_changeset_errors(changeset)
+            ProviderHelper.display_creation_error(changeset)
         end
 
       {:error, reason} ->
         Shell.error("Failed to fetch catalog: #{inspect(reason)}")
     end
-  end
-
-  defp print_changeset_errors(changeset) do
-    Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
-      Enum.reduce(opts, msg, fn {key, value}, acc ->
-        String.replace(acc, "%{#{key}}", to_string(value))
-      end)
-    end)
-    |> Enum.each(fn {field, messages} ->
-      Shell.error("  #{field}: #{Enum.join(messages, ", ")}")
-    end)
   end
 end

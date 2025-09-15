@@ -17,10 +17,12 @@ defmodule Mix.Tasks.Tango.Providers.Show do
 
   use Mix.Task
   alias Mix.Shell.IO, as: Shell
+  alias Mix.Tasks.Helpers.TaskHelper
 
   @shortdoc "Shows detailed provider configuration"
 
   def run([provider_name | _]) when is_binary(provider_name) do
+    TaskHelper.ensure_http_started()
     Shell.info("📡 Fetching provider details for '#{provider_name}'...")
 
     case Tango.Catalog.get_catalog() do
@@ -55,20 +57,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
     Shell.info("")
 
     if config["auth_mode"] == "OAUTH2" do
-      Shell.info("OAuth2 Configuration")
-      Shell.info("  Authorization URL: #{config["authorization_url"]}")
-      Shell.info("  Token URL: #{config["token_url"]}")
-      Shell.info("")
-
-      if config["default_scopes"] && length(config["default_scopes"]) > 0 do
-        Shell.info("Default Scopes:")
-
-        Enum.each(config["default_scopes"], fn scope ->
-          Shell.info("  - #{scope}")
-        end)
-
-        Shell.info("")
-      end
+      display_oauth2_config(config)
     end
 
     if config["docs"] do
@@ -89,4 +78,25 @@ defmodule Mix.Tasks.Tango.Providers.Show do
       end)
     end
   end
+
+  defp display_oauth2_config(config) do
+    Shell.info("OAuth2 Configuration")
+    Shell.info("  Authorization URL: #{config["authorization_url"]}")
+    Shell.info("  Token URL: #{config["token_url"]}")
+    Shell.info("")
+
+    display_default_scopes(config["default_scopes"])
+  end
+
+  defp display_default_scopes(scopes) when is_list(scopes) and length(scopes) > 0 do
+    Shell.info("Default Scopes:")
+
+    Enum.each(scopes, fn scope ->
+      Shell.info("  - #{scope}")
+    end)
+
+    Shell.info("")
+  end
+
+  defp display_default_scopes(_), do: :ok
 end

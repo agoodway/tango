@@ -226,6 +226,160 @@ defmodule Tango.ProviderTest do
     end
   end
 
+  describe "create_provider_from_nango/3" do
+    test "creates provider from nango config with OAuth2 credentials" do
+      nango_config = %{
+        "display_name" => "GitHub",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" => "https://github.com/login/oauth/authorize",
+        "token_url" => "https://github.com/login/oauth/access_token",
+        "default_scopes" => ["user:email"],
+        "categories" => ["dev-tools"]
+      }
+
+      opts = [client_id: "test_client_id", client_secret: "test_secret"]
+
+      assert {:ok, provider} = Provider.create_provider_from_nango("github", nango_config, opts)
+
+      assert provider.name == "GitHub"
+      assert provider.slug == "github"
+      assert provider.client_secret == "test_secret"
+      assert provider.default_scopes == ["user:email"]
+      assert provider.active == true
+      # Verify config structure contains OAuth URLs
+      assert is_map(provider.config)
+      assert provider.config["auth_url"] == "https://github.com/login/oauth/authorize"
+      assert provider.config["token_url"] == "https://github.com/login/oauth/access_token"
+    end
+
+    test "creates provider from nango config with API key" do
+      nango_config = %{
+        "display_name" => "Stripe",
+        "auth_mode" => "API_KEY",
+        "categories" => ["payments"],
+        "api_config" => %{
+          "headers" => %{
+            "authorization" => "Bearer ${api_key}"
+          }
+        }
+      }
+
+      # API key providers still need client_secret for the schema
+      opts = [api_key: "sk_test_123", client_secret: "placeholder"]
+
+      assert {:ok, provider} = Provider.create_provider_from_nango("stripe", nango_config, opts)
+
+      assert provider.name == "Stripe"
+      assert provider.slug == "stripe"
+      assert provider.active == true
+      # Verify basic config structure exists
+      assert is_map(provider.config)
+    end
+
+    test "creates audit log entry on successful creation" do
+      nango_config = %{
+        "display_name" => "Test Provider",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" => "https://test.com/auth",
+        "token_url" => "https://test.com/token"
+      }
+
+      opts = [client_id: "test_id", client_secret: "test_secret"]
+
+      # Count audit logs before
+      initial_count = Repo.aggregate(Tango.Schemas.AuditLog, :count, :id)
+
+      assert {:ok, provider} = Provider.create_provider_from_nango("test", nango_config, opts)
+
+      # Check audit log was created
+      final_count = Repo.aggregate(Tango.Schemas.AuditLog, :count, :id)
+      assert final_count == initial_count + 1
+
+      # Verify audit log content
+      audit_log = Repo.get_by(Tango.Schemas.AuditLog, provider_id: provider.id)
+      assert audit_log.event_type == :provider_created
+      assert audit_log.success == true
+      # Note: event_data structure may be different than expected
+      # This test verifies the audit log was created
+    end
+
+    test "returns error when nango config is invalid" do
+      invalid_nango_config = %{
+        # Invalid: empty name
+        "display_name" => "",
+        # Invalid: unsupported auth mode
+        "auth_mode" => "INVALID_MODE"
+      }
+
+      opts = [client_id: "test_id", client_secret: "test_secret"]
+
+      assert {:error, changeset} =
+               Provider.create_provider_from_nango("invalid", invalid_nango_config, opts)
+
+      assert changeset.errors[:name] != nil
+    end
+
+    test "handles duplicate slug error" do
+      nango_config = %{
+        "display_name" => "Duplicate Test",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" => "https://test.com/auth",
+        "token_url" => "https://test.com/token"
+      }
+
+      opts = [client_id: "test_id", client_secret: "test_secret"]
+
+      # Create first provider
+      assert {:ok, _first} = Provider.create_provider_from_nango("duplicate", nango_config, opts)
+
+      # Try to create second with same slug
+      assert {:error, changeset} =
+               Provider.create_provider_from_nango("duplicate", nango_config, opts)
+
+      assert changeset.errors[:slug] != nil
+    end
+
+    test "handles empty opts list appropriately" do
+      nango_config = %{
+        "display_name" => "No Opts Test",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" => "https://test.com/auth",
+        "token_url" => "https://test.com/token"
+      }
+
+      # Empty opts should fail due to required client_secret
+      assert {:error, changeset} = Provider.create_provider_from_nango("noopts", nango_config, [])
+
+      # Should have validation error for required field
+      assert changeset.errors[:client_secret] != nil
+    end
+
+    test "preserves nango config structure in provider config" do
+      nango_config = %{
+        "display_name" => "Complex Config",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" => "https://test.com/auth",
+        "token_url" => "https://test.com/token",
+        "default_scopes" => ["read", "write"],
+        "categories" => ["category1", "category2"],
+        "docs" => "https://docs.test.com",
+        "custom_field" => "custom_value"
+      }
+
+      opts = [client_id: "test_id", client_secret: "test_secret"]
+
+      assert {:ok, provider} = Provider.create_provider_from_nango("complex", nango_config, opts)
+
+      # Verify some nango config is preserved in provider config
+      # Note: The from_nango_config function may transform some field names
+      assert provider.config["auth_url"] == "https://test.com/auth"
+      assert provider.config["token_url"] == "https://test.com/token"
+      assert provider.default_scopes == ["read", "write"]
+      # Custom fields should be preserved in metadata
+      assert provider.metadata["categories"] == ["category1", "category2"]
+    end
+  end
+
   describe "update_provider/2" do
     test "updates provider attributes" do
       # Use factory to create valid provider

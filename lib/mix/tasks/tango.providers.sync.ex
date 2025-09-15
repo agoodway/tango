@@ -27,6 +27,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
 
   use Mix.Task
   alias Mix.Shell.IO, as: Shell
+  alias Mix.Tasks.Helpers.{ProviderHelper, TaskHelper}
 
   @shortdoc "Syncs providers from Nango catalog to database"
 
@@ -45,7 +46,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
   def run(args) do
     {opts, _args, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 
-    ensure_repo_started()
+    TaskHelper.ensure_started()
     Shell.info("📡 Fetching Nango provider catalog...")
 
     case Tango.Catalog.get_catalog() do
@@ -179,7 +180,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
 
           {:error, changeset} ->
             Shell.error("❌ Failed to create #{name}:")
-            print_changeset_errors(changeset)
+            ProviderHelper.print_changeset_errors(changeset)
             0
         end
       end)
@@ -204,7 +205,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
 
           {:error, changeset} ->
             Shell.error("❌ Failed to update #{name}:")
-            print_changeset_errors(changeset)
+            ProviderHelper.print_changeset_errors(changeset)
             0
         end
       end)
@@ -232,28 +233,6 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
       Map.put(base_attrs, :config, config)
     else
       base_attrs
-    end
-  end
-
-  defp print_changeset_errors(changeset) do
-    Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
-      Enum.reduce(opts, msg, fn {key, value}, acc ->
-        String.replace(acc, "%{#{key}}", to_string(value))
-      end)
-    end)
-    |> Enum.each(fn {field, messages} ->
-      Shell.error("  #{field}: #{Enum.join(messages, ", ")}")
-    end)
-  end
-
-  defp ensure_repo_started do
-    # Start the repo if not already started
-    repo = Application.get_env(:tango, :repo, Tango.Repo)
-
-    case repo.start_link() do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
-      error -> error
     end
   end
 end

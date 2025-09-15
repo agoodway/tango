@@ -7,21 +7,15 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   """
 
   alias Mix.Shell.IO, as: Shell
+  alias Mix.Tasks.Helpers.TaskHelper
 
   @doc """
   Ensures the repo is started for Mix tasks.
+
+  Delegates to TaskHelper for consistent application startup.
   """
   def ensure_repo_started do
-    Mix.Task.run("app.start")
-
-    case Application.get_env(:tango, :repo) do
-      nil ->
-        Shell.error("Tango repo not configured. Please set :repo in your config.")
-        System.halt(1)
-
-      repo ->
-        repo.start_link()
-    end
+    TaskHelper.ensure_started()
   end
 
   @doc """
@@ -52,7 +46,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
     case Tango.Catalog.suggest_similar(provider_name) do
       [] ->
         Shell.info("   No similar providers found.")
-        Shell.info("   Run 'mix tango.providers.list' to see all available providers.")
+        Shell.info("   Use 'mix tango.providers.show <name>' to view specific provider details.")
 
       suggestions ->
         Shell.info("   Did you mean one of these?")
@@ -162,12 +156,31 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
 
   @doc """
   Displays successful provider creation message.
+
+  Shows provider details including optional default scopes for OAuth2 providers.
   """
   def display_provider_success(provider, auth_type) do
     Shell.info("✅ Created #{provider.name} provider")
     Shell.info("   Display Name: #{provider.name}")
     Shell.info("   Status: #{if provider.active, do: "Active", else: "Inactive"}")
     Shell.info("   Auth Mode: #{auth_type}")
+
+    display_provider_scopes(provider)
+  end
+
+  defp display_provider_scopes(provider)
+       when is_list(provider.default_scopes) and length(provider.default_scopes) > 0 do
+    Shell.info("   Default Scopes: #{Enum.join(provider.default_scopes, ", ")}")
+  end
+
+  defp display_provider_scopes(_provider), do: :ok
+
+  @doc """
+  Displays provider creation error with formatted changeset errors.
+  """
+  def display_creation_error(changeset) do
+    Shell.error("❌ Failed to create provider:")
+    print_changeset_errors(changeset)
   end
 
   @doc """
