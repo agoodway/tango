@@ -131,7 +131,7 @@ defmodule Tango.Migration do
 
   defp change(range, direction, opts) do
     for version <- range do
-      module = :"Elixir.Tango.Migrations.V#{pad_version(version)}"
+      module = :"Elixir.Tango.Migrations.Versions.V#{pad_version(version)}"
       apply(module, direction, [opts])
     end
 

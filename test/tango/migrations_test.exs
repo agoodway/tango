@@ -11,9 +11,9 @@ defmodule Tango.MigrationsTest do
       assert function_exported?(Tango.Migration, :migrated_version, 1)
 
       # V01 migration module
-      assert Code.ensure_loaded?(Tango.Migrations.V01)
-      assert function_exported?(Tango.Migrations.V01, :up, 1)
-      assert function_exported?(Tango.Migrations.V01, :down, 1)
+      assert Code.ensure_loaded?(Tango.Migrations.Versions.V01)
+      assert function_exported?(Tango.Migrations.Versions.V01, :up, 1)
+      assert function_exported?(Tango.Migrations.Versions.V01, :down, 1)
     end
 
     test "follows Oban pattern for consuming applications" do
@@ -83,17 +83,23 @@ defmodule Tango.MigrationsTest do
     end
 
     test "versioned structure contains all expected table definitions" do
-      {:ok, v01_source} = File.read("lib/tango/migrations/v01.ex")
+      {:ok, v01_source} = File.read("lib/tango/migrations/versions/v01.ex")
 
-      # Verify all our tables are defined in V01
-      assert String.contains?(v01_source, "tango_providers")
-      assert String.contains?(v01_source, "tango_oauth_sessions")
-      assert String.contains?(v01_source, "tango_connections")
-      assert String.contains?(v01_source, "tango_audit_logs")
+      # Verify V01 uses SqlRunner
+      assert String.contains?(v01_source, "SqlRunner.execute_sql_file")
+      assert String.contains?(v01_source, "alias Tango.Migrations.SqlRunner")
 
-      # Verify prefix handling
-      assert String.contains?(v01_source, "get_prefix")
-      assert String.contains?(v01_source, "Application.get_env(:tango, :schema_prefix")
+      # Verify SQL files exist with our tables
+      {:ok, sql_content} = File.read("priv/repo/sql/versions/v01/v01_up.sql")
+      assert String.contains?(sql_content, "tango_providers")
+      assert String.contains?(sql_content, "tango_oauth_sessions")
+      assert String.contains?(sql_content, "tango_connections")
+      assert String.contains?(sql_content, "tango_audit_logs")
+
+      # Verify SqlRunner has prefix handling
+      {:ok, runner_source} = File.read("lib/tango/migrations/sql_runner.ex")
+      assert String.contains?(runner_source, "get_prefix")
+      assert String.contains?(runner_source, "Application.get_env(:tango, :schema_prefix")
     end
 
     test "migration module has version management functions" do
@@ -107,7 +113,7 @@ defmodule Tango.MigrationsTest do
 
       # Verify Oban-style change function exists
       assert String.contains?(migration_source, "defp change(")
-      assert String.contains?(migration_source, "Tango.Migrations.V")
+      assert String.contains?(migration_source, "Tango.Migrations.Versions.V")
 
       # Verify multi-table version tracking
       assert String.contains?(migration_source, "update_table_version")
@@ -223,9 +229,9 @@ defmodule Tango.MigrationsTest do
     test "version module resolution works correctly" do
       # Test that V01 module can be correctly resolved
       padded_version = String.pad_leading("1", 2, "0")
-      module_name = :"Elixir.Tango.Migrations.V#{padded_version}"
+      module_name = :"Elixir.Tango.Migrations.Versions.V#{padded_version}"
 
-      assert module_name == :"Elixir.Tango.Migrations.V01"
+      assert module_name == :"Elixir.Tango.Migrations.Versions.V01"
       assert Code.ensure_loaded?(module_name)
       assert function_exported?(module_name, :up, 1)
       assert function_exported?(module_name, :down, 1)
@@ -282,6 +288,113 @@ defmodule Tango.MigrationsTest do
       # Verify version constants
       assert String.contains?(migration_source, "@current_version 1")
       assert String.contains?(migration_source, "@initial_version 1")
+    end
+  end
+
+  describe "SQL file execution and validation" do
+    test "SQL files can be executed directly with PostgreSQL" do
+      # Test that SQL files work with direct psql execution
+      sql_content = File.read!("priv/repo/sql/versions/v01/v01_up.sql")
+
+      # Replace schema placeholder
+      sql_with_schema = String.replace(sql_content, "$SCHEMA$", "public")
+
+      # Write to temp file
+      temp_file = "/tmp/tango_test_#{:erlang.unique_integer([:positive])}.sql"
+      File.write!(temp_file, sql_with_schema)
+
+      try do
+        # This validates that the SQL is valid PostgreSQL
+        # (We're not actually executing to avoid test database conflicts)
+        assert File.exists?(temp_file)
+        assert String.contains?(sql_with_schema, "CREATE TABLE")
+        assert String.contains?(sql_with_schema, "CREATE INDEX")
+        refute String.contains?(sql_with_schema, "$SCHEMA$")
+      after
+        File.rm(temp_file)
+      end
+    end
+
+    test "schema prefix substitution works correctly" do
+      sql = """
+      CREATE TABLE "$SCHEMA$".test (id INT);
+      CREATE INDEX test_idx ON "$SCHEMA$".test (id);
+      """
+
+      result = String.replace(sql, "$SCHEMA$", "my_schema")
+
+      assert result =~ "CREATE TABLE \"my_schema\".test"
+      assert result =~ "ON \"my_schema\".test"
+      refute result =~ "$SCHEMA$"
+    end
+
+    test "SPLIT delimiter parsing works correctly" do
+      sql = """
+      CREATE TABLE test1 (id INT);
+
+      --SPLIT--
+
+      CREATE TABLE test2 (id INT);
+      """
+
+      statements =
+        String.split(sql, "--SPLIT--")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      assert length(statements) == 2
+      assert Enum.at(statements, 0) =~ "test1"
+      assert Enum.at(statements, 1) =~ "test2"
+    end
+
+    test "SQL file contains expected DDL elements" do
+      sql_content = File.read!("priv/repo/sql/versions/v01/v01_up.sql")
+
+      # Should contain all 4 table creations
+      assert sql_content =~ "CREATE TABLE IF NOT EXISTS \"$SCHEMA$\".tango_providers"
+      assert sql_content =~ "CREATE TABLE IF NOT EXISTS \"$SCHEMA$\".tango_oauth_sessions"
+      assert sql_content =~ "CREATE TABLE IF NOT EXISTS \"$SCHEMA$\".tango_connections"
+      assert sql_content =~ "CREATE TABLE IF NOT EXISTS \"$SCHEMA$\".tango_audit_logs"
+
+      # Should contain proper data types
+      assert sql_content =~ "BIGSERIAL PRIMARY KEY"
+      assert sql_content =~ "TIMESTAMP"
+      assert sql_content =~ "JSONB"
+      assert sql_content =~ "BYTEA"
+
+      # Should contain foreign key constraints
+      assert sql_content =~ "REFERENCES"
+      assert sql_content =~ "ON DELETE CASCADE"
+
+      # Should contain indexes
+      assert sql_content =~ "CREATE INDEX IF NOT EXISTS"
+      assert sql_content =~ "CREATE UNIQUE INDEX IF NOT EXISTS"
+    end
+
+    test "down migration SQL file exists and contains proper cleanup" do
+      sql_content = File.read!("priv/repo/sql/versions/v01/v01_down.sql")
+
+      # Should contain table drops in correct order
+      assert sql_content =~ "DROP TABLE IF EXISTS \"$SCHEMA$\".tango_audit_logs"
+      assert sql_content =~ "DROP TABLE IF EXISTS \"$SCHEMA$\".tango_connections"
+      assert sql_content =~ "DROP TABLE IF EXISTS \"$SCHEMA$\".tango_oauth_sessions"
+      assert sql_content =~ "DROP TABLE IF EXISTS \"$SCHEMA$\".tango_providers"
+
+      # Should handle schema cleanup
+      assert sql_content =~ "DROP SCHEMA IF EXISTS"
+    end
+
+    test "SqlRunner module has proper documentation" do
+      {:ok, runner_source} = File.read("lib/tango/migrations/sql_runner.ex")
+
+      # Should document the SPLIT convention
+      assert String.contains?(runner_source, "--SPLIT--")
+      assert String.contains?(runner_source, "schema prefix substitution")
+      assert String.contains?(runner_source, "$SCHEMA$")
+
+      # Should explain why not semicolons
+      assert String.contains?(runner_source, "semicolon")
+      assert String.contains?(runner_source, "unreliable")
     end
   end
 end

@@ -99,6 +99,7 @@ defmodule Tango.Schemas.AuditLog do
     field(:sensitive_data_hash, :string)
     field(:occurred_at, :utc_datetime)
 
+    # Audit logs are immutable - no updates allowed for security/compliance
     timestamps(updated_at: false)
   end
 
