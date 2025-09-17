@@ -91,7 +91,9 @@ config :tango,
   api_key: System.get_env("TANGO_API_KEY")
 ```
 
-Generate and run the Tango migration:
+### Migrations
+
+If using Ecto for migrations, generate and run the Tango migration:
 
 ```bash
 # Generate migration file
@@ -114,6 +116,8 @@ end
 # Run migrations
 mix ecto.migrate
 ```
+
+Otherwise, if not using Ecto migrations, you can copy the SQL from `priv/repo/sql/versions/v01/v01_up.sql` and add it to your migration tool of choice (be sure to replace the schema prefix with "public" or your custom prefix).
 
 ## OAuth Providers
 
