@@ -11,7 +11,7 @@ defmodule Tango.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls],
-      preferred_cli_coverages: ["coveralls", "coveralls.detail", "coveralls.html"],
+      preferred_cli_coverages: ["coveralls", "coveralls.detail", "coveralls.html", "coveralls.github"],
       dialyzer: [
         plt_file: {:no_warn, "priv/plts/dialyzer.plt"}
       ]
