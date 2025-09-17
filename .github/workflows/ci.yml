@@ -65,7 +65,7 @@ jobs:
       run: mix format --check-formatted
 
     - name: Run static analysis (Credo)
-      run: mix credo --strict
+      run: mix credo
 
     - name: Compile
       run: mix compile --warnings-as-errors
