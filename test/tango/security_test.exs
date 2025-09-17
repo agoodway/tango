@@ -310,7 +310,7 @@ defmodule Tango.SecurityTest do
         )
 
       # State no longer valid due to session cleanup
-      assert reason == :invalid_state
+      assert reason == :session_not_found
     end
 
     test "concurrent session creation with same state should fail", %{provider: provider} do

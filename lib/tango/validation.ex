@@ -84,15 +84,11 @@ defmodule Tango.Validation do
   """
   def validate_authorization_code(""), do: {:error, :invalid_authorization_code}
 
-  def validate_authorization_code(code) when is_binary(code) and byte_size(code) > 512 do
-    {:error, :authorization_code_too_long}
-  end
-
   def validate_authorization_code(code) when is_binary(code) do
-    if String.match?(code, ~r/^[a-zA-Z0-9_.-]+$/) do
-      :ok
-    else
-      {:error, :invalid_authorization_code}
+    cond do
+      byte_size(code) > 512 -> {:error, :authorization_code_too_long}
+      String.trim(code) == "" -> {:error, :invalid_authorization_code}
+      true -> :ok
     end
   end
 
@@ -198,7 +194,8 @@ defmodule Tango.Validation do
   def validate_scopes(_), do: {:error, :invalid_scopes}
 
   defp validate_scope(scope) when is_binary(scope) do
-    String.match?(scope, ~r/^[a-zA-Z0-9:._-]+$/) and byte_size(scope) <= 100
+    # OAuth scopes can be URLs or simple strings - just check basic sanity
+    byte_size(scope) <= 500 and String.trim(scope) != ""
   end
 
   defp validate_scope(_), do: false

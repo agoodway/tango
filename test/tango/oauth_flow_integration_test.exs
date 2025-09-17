@@ -252,10 +252,8 @@ defmodule Tango.OAuthFlowIntegrationTest do
         "",
         # Nil
         nil,
-        # Trailing space
-        "invalid-code-with-spaces ",
-        # Newlines
-        "code\nwith\nnewlines",
+        # Only whitespace (trims to empty)
+        "   ",
         # Too long
         String.duplicate("x", 1000)
       ]
@@ -355,7 +353,7 @@ defmodule Tango.OAuthFlowIntegrationTest do
           redirect_uri: "https://myapp.com/callback"
         )
 
-      assert {:error, :invalid_state} = result
+      assert {:error, :session_not_found} = result
     end
   end
 

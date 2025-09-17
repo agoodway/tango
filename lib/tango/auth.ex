@@ -181,8 +181,11 @@ defmodule Tango.Auth do
            :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]) do
         {:ok, %{session: session, validated_opts: validated_opts}}
       else
-        {:error, :invalid_state_format} -> {:error, :invalid_state}
-        _ -> {:error, :invalid_state}
+        {:error, error} when is_atom(error) ->
+          {:error, error}
+
+        _error ->
+          {:error, :invalid_state}
       end
     end)
     |> Ecto.Multi.run(:exchange_token, fn _repo,
@@ -509,5 +512,262 @@ defmodule Tango.Auth do
       _ ->
         :ok
     end
+  end
+
+  @doc """
+  Generate authorization URL with optional scopes.
+
+  Uses session/provider defaults when scopes list is empty,
+  otherwise uses explicit scopes provided.
+  """
+  def authorize_url_with_scopes(session_token, redirect_uri, []) do
+    authorize_url(session_token, redirect_uri: redirect_uri)
+  end
+
+  def authorize_url_with_scopes(session_token, redirect_uri, scopes) when is_list(scopes) do
+    authorize_url(session_token, redirect_uri: redirect_uri, scopes: scopes)
+  end
+
+  @doc """
+  Parse OAuth scopes from various formats.
+  """
+  def parse_scopes(scopes) when is_binary(scopes) do
+    String.split(scopes, " ", trim: true)
+  end
+
+  def parse_scopes(scopes) when is_list(scopes), do: scopes
+  def parse_scopes(_), do: []
+
+  @doc """
+  Perform OAuth callback exchange for popup flows.
+  """
+  def perform_callback_exchange(_conn, nil, _state), do: nil
+  def perform_callback_exchange(_conn, _code, nil), do: nil
+
+  def perform_callback_exchange(conn, code, state) do
+    with {:ok, tenant_id, _original_state} <- decode_state_safely(state),
+         callback_url <- build_https_callback_url(conn),
+         {:ok, connection} <-
+           exchange_code(state, code, tenant_id, redirect_uri: callback_url),
+         {:ok, provider} <- Tango.get_provider_by_id(connection.provider_id),
+         access_token <- Connection.get_raw_access_token(connection) do
+      {:ok, build_connection_response(connection, provider, access_token)}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_state}
+    end
+  end
+
+  @doc """
+  Build connection response for OAuth callbacks.
+  """
+  def build_connection_response(connection, provider, access_token) do
+    %{
+      provider: provider.name,
+      status: connection.status,
+      scopes: connection.granted_scopes,
+      expires_at: connection.expires_at,
+      access_token: access_token
+    }
+  end
+
+  @doc """
+  Safely decode OAuth state parameter.
+  """
+  def decode_state_safely(nil), do: :error
+
+  def decode_state_safely(state) do
+    case decode_state_with_tenant(state) do
+      {:ok, original_state, tenant_id} -> {:ok, tenant_id, original_state}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  @doc """
+  Log OAuth callback errors with audit trail.
+  """
+  def log_oauth_callback_error(state, error, error_description) do
+    # Try to decode state to get tenant ID and session info
+    {tenant_id, session_id, event_type, error_code} =
+      case decode_state_safely(state) do
+        {:ok, decoded_tenant_id, original_state} ->
+          {decoded_tenant_id, original_state, classify_oauth_error(error),
+           map_oauth_error_code(error)}
+
+        _ ->
+          {"unknown", nil, :oauth_callback_error, :missing_callback_params}
+      end
+
+    event_data = %{
+      oauth_error: error,
+      error_description: error_description,
+      state_present: !is_nil(state),
+      state_decodable: tenant_id != "unknown"
+    }
+
+    AuditLog.log_oauth_callback_error(event_type, error_code, tenant_id, session_id, event_data)
+    |> Application.get_env(:tango, :repo, Tango.TestRepo).insert()
+    |> case do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("Failed to log OAuth callback error: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  @doc """
+  Classify OAuth error types.
+  """
+  def classify_oauth_error("access_denied"), do: :oauth_denied
+  def classify_oauth_error(_), do: :oauth_provider_error
+
+  @doc """
+  Map OAuth error codes to atoms.
+  """
+  def map_oauth_error_code("access_denied"), do: :access_denied
+  def map_oauth_error_code("invalid_request"), do: :invalid_request
+  def map_oauth_error_code("invalid_client"), do: :invalid_client
+  def map_oauth_error_code("invalid_grant"), do: :invalid_grant
+  def map_oauth_error_code("unsupported_grant_type"), do: :unsupported_grant_type
+  def map_oauth_error_code("invalid_scope"), do: :invalid_scope
+  def map_oauth_error_code("server_error"), do: :server_error
+  def map_oauth_error_code("temporarily_unavailable"), do: :temporarily_unavailable
+  def map_oauth_error_code(_), do: :provider_error
+
+  @doc """
+  Build HTTPS callback URL from connection.
+  """
+  def build_https_callback_url(conn) do
+    build_callback_url(conn)
+  end
+
+  @doc """
+  Build OAuth callback URL from connection, handling proxy headers.
+  """
+  def build_callback_url(conn) do
+    # Check for forwarded proto header to handle proxy scenarios
+    scheme =
+      case Plug.Conn.get_req_header(conn, "x-forwarded-proto") do
+        ["https"] -> "https"
+        ["http"] -> "http"
+        _ -> conn.scheme |> to_string()
+      end
+
+    host = conn.host
+
+    # Only include port if it's non-standard for the scheme
+    port =
+      case {scheme, conn.port} do
+        {"https", 443} -> ""
+        {"http", 80} -> ""
+        {_, port} -> ":#{port}"
+      end
+
+    "#{scheme}://#{host}#{port}/api/oauth/callback"
+  end
+
+  @doc """
+  Generate OAuth callback HTML page for popup flows.
+  """
+  def generate_callback_html(_code, _state, _error, _error_description, exchange_result) do
+    # Safely encode exchange result for JavaScript injection
+    # Use HTML escaping to prevent XSS attacks
+    result_json =
+      case exchange_result do
+        {:ok, data} -> Jason.encode!(data)
+        {:error, reason} -> Jason.encode!(%{error: to_string(reason)})
+        nil -> "null"
+      end
+      |> html_escape_json()
+
+    """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>OAuth Callback</title>
+      <meta charset="utf-8">
+      <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self';">
+    </head>
+    <body>
+      <div id="status">Processing OAuth callback...</div>
+
+      <script>
+        (function() {
+          const urlParams = new URLSearchParams(window.location.search);
+          const code = urlParams.get('code');
+          const state = urlParams.get('state');
+          const error = urlParams.get('error');
+          const errorDescription = urlParams.get('error_description');
+
+          async function handleCallback() {
+            try {
+              if (error) {
+                throw new Error(errorDescription || error);
+              }
+
+              // Use server-side exchange result instead of making API calls
+              const exchangeResult = #{result_json};
+
+              if (!exchangeResult) {
+                throw new Error('Missing authorization code or state parameter');
+              }
+
+              if (exchangeResult.error) {
+                throw new Error(exchangeResult.error);
+              }
+
+              // Send success result to parent window
+              if (window.opener) {
+                window.opener.postMessage({
+                  type: 'oauth_complete',
+                  connection: {
+                    provider: exchangeResult.provider,
+                    status: exchangeResult.status,
+                    scopes: exchangeResult.scopes,
+                    expires_at: exchangeResult.expires_at,
+                    token: exchangeResult.access_token
+                  }
+                }, '*');
+              }
+
+              document.getElementById('status').textContent = 'OAuth flow completed successfully. You can close this window.';
+
+            } catch (error) {
+              console.error('OAuth callback error:', error);
+
+              // Send error to parent window
+              if (window.opener) {
+                window.opener.postMessage({
+                  type: 'oauth_error',
+                  error: error.message
+                }, '*');
+              }
+
+              document.getElementById('status').textContent = 'OAuth flow failed: ' + error.message;
+            }
+          }
+
+          // Process callback when page loads
+          handleCallback();
+        })();
+      </script>
+    </body>
+    </html>
+    """
+  end
+
+  @doc """
+  Safely escape JSON for injection into HTML/JavaScript contexts.
+  """
+  def html_escape_json(json_string) do
+    # Jason.encode! with escape: :html_safe handles XSS prevention automatically
+    json_string
+    |> Jason.decode!()
+    |> Jason.encode!(escape: :html_safe)
   end
 end

@@ -147,7 +147,7 @@ defmodule Tango.ValidationTest do
   end
 
   describe "validate_authorization_code/1" do
-    test "accepts valid authorization codes" do
+    test "accepts valid authorization codes including provider-specific formats" do
       valid_codes = [
         "abc123def456",
         :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false),
@@ -155,6 +155,14 @@ defmodule Tango.ValidationTest do
         "code_with_underscores",
         "UPPERCASE-CODE",
         "MixedCase123",
+        # Google-style codes with forward slashes and special chars
+        "4/0AX4XfWh_abc123_def456-xyz789",
+        "4/abc-def/ghi_jkl.mno",
+        # GitHub-style codes
+        "ghu_1234567890abcdef",
+        # URL-safe characters
+        "code.with.dots",
+        "code/with/slashes",
         # Long but reasonable
         String.duplicate("a", 512)
       ]
@@ -164,23 +172,13 @@ defmodule Tango.ValidationTest do
       end)
     end
 
-    test "rejects invalid authorization codes" do
+    test "rejects invalid authorization codes for security reasons" do
       invalid_codes = [
-        # Empty
+        # Empty/whitespace only
         "",
-        # Whitespace
-        " ",
-        "code with spaces",
-        # XSS
-        "code<script>",
-        # SQL injection
-        "code;DROP",
-        # Newline
-        "code\n123",
-        # Slash
-        "code/path",
-        # @ symbol
-        "code@email",
+        "   ",
+        "\t",
+        "\n",
         # Too long
         String.duplicate("a", 2000)
       ]
@@ -241,7 +239,7 @@ defmodule Tango.ValidationTest do
   end
 
   describe "validate_scopes/1" do
-    test "accepts valid scope arrays" do
+    test "accepts valid scope arrays including URL-based scopes" do
       valid_scope_lists = [
         [],
         ["read"],
@@ -249,7 +247,24 @@ defmodule Tango.ValidationTest do
         ["user", "repo", "gist"],
         ["user:email", "repo:status"],
         ["read_user", "write_repo"],
-        ["openid", "profile", "email"]
+        ["openid", "profile", "email"],
+        # Google Calendar API scopes (URL-based)
+        ["https://www.googleapis.com/auth/calendar"],
+        ["https://www.googleapis.com/auth/calendar.readonly"],
+        # Microsoft Graph API scopes
+        ["https://graph.microsoft.com/User.Read"],
+        ["https://graph.microsoft.com/Calendars.ReadWrite"],
+        # Mixed formats
+        ["read", "https://api.example.com/auth/scope", "user:profile"],
+        # Complex URL scopes with query params
+        ["https://api.example.com/auth?scope=read&version=v1"],
+        # Scopes with spaces and special characters (modern OAuth providers)
+        ["scope with spaces"],
+        ["scope.with.dots"],
+        ["scope/with/slashes"],
+        ["scope:with:colons"],
+        ["scope-with-dashes"],
+        ["scope_with_underscores"]
       ]
 
       Enum.each(valid_scope_lists, fn scopes ->
@@ -259,10 +274,6 @@ defmodule Tango.ValidationTest do
 
     test "rejects invalid scope formats" do
       invalid_scopes = [
-        ["scope with spaces"],
-        ["scope<script>"],
-        ["scope;DROP"],
-        ["scope\nwith\nnewlines"],
         # Non-string in array
         [123],
         # Atom in array
@@ -270,19 +281,18 @@ defmodule Tango.ValidationTest do
         # String instead of array
         "not-an-array",
         nil,
-        %{}
+        %{},
+        # Empty strings in array
+        ["valid", ""],
+        ["", "also-valid"],
+        # Very long scopes
+        [String.duplicate("a", 1000)]
       ]
 
       Enum.each(invalid_scopes, fn scopes ->
         assert {:error, _reason} = Validation.validate_scopes(scopes),
                "Should have failed for: #{inspect(scopes)}"
       end)
-    end
-
-    test "validates individual scope strings" do
-      assert {:error, :invalid_scopes} = Validation.validate_scopes(["valid", ""])
-      assert {:error, :invalid_scopes} = Validation.validate_scopes(["valid", "invalid space"])
-      assert {:error, :invalid_scopes} = Validation.validate_scopes(["valid", "invalid<tag>"])
     end
   end
 
@@ -415,7 +425,7 @@ defmodule Tango.ValidationTest do
       end)
     end
 
-    test "validates against common injection patterns" do
+    test "validates against injection patterns for tenant_id and state only" do
       injection_attempts = [
         "'; DROP TABLE users; --",
         "<script>alert('xss')</script>",
@@ -429,10 +439,13 @@ defmodule Tango.ValidationTest do
       ]
 
       Enum.each(injection_attempts, fn attempt ->
+        # These fields require strict validation for security
         assert {:error, _} = Validation.validate_tenant_id(attempt)
         assert {:error, _} = Validation.validate_state(attempt)
-        assert {:error, _} = Validation.validate_authorization_code(attempt)
         assert {:error, _} = Validation.validate_provider_slug(attempt)
+
+        # Authorization codes are provider-generated, so we don't validate format
+        # (only length and non-empty)
       end)
     end
   end
