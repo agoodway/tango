@@ -92,7 +92,7 @@ mix deps.get
 mix format --check-formatted
 
 # Run static analysis
-mix credo --strict
+mix credo
 
 # Run tests with coverage
 mix coveralls
