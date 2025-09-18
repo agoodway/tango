@@ -47,10 +47,21 @@ defmodule Mix.Tasks.Helpers.TaskHelper do
   def ensure_repo_started do
     repo = Application.get_env(:tango, :repo, Tango.Repo)
 
-    case repo.start_link() do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
-      error -> error
+    # Ensure the host application is compiled and loaded before starting repo
+    Mix.Task.run("app.config")
+    Mix.Task.run("loadpaths")
+    Mix.Task.run("compile")
+
+    case Code.ensure_compiled(repo) do
+      {:module, _} ->
+        case repo.start_link() do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+          error -> error
+        end
+
+      {:error, reason} ->
+        Mix.raise("Could not load #{inspect(repo)}: #{inspect(reason)}")
     end
   end
 end

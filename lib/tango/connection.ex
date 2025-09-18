@@ -73,21 +73,26 @@ defmodule Tango.Connection do
   @doc """
   Gets an active connection for provider and tenant.
 
+  Provider is identified by slug, not name.
+
   ## Examples
 
       iex> get_connection_for_provider("github", "user-123")
+      {:ok, %Connection{}}
+
+      iex> get_connection_for_provider("google", "user-123")
       {:ok, %Connection{}}
 
       iex> get_connection_for_provider("nonexistent", "user-123")
       {:error, :not_found}
 
   """
-  def get_connection_for_provider(provider_name, tenant_id)
-      when is_binary(provider_name) and is_binary(tenant_id) do
+  def get_connection_for_provider(provider_slug, tenant_id)
+      when is_binary(provider_slug) and is_binary(tenant_id) do
     query =
       from(c in Connection,
         join: p in assoc(c, :provider),
-        where: p.name == ^provider_name,
+        where: p.slug == ^provider_slug,
         where: c.tenant_id == ^tenant_id,
         where: c.status == :active,
         order_by: [desc: c.inserted_at],

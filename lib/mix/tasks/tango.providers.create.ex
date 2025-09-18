@@ -9,14 +9,20 @@ defmodule Mix.Tasks.Tango.Providers.Create do
   ## Options
 
       --client-id ID        OAuth2 client ID
-      --client-secret SECRET OAuth2 client secret  
+      --client-secret SECRET OAuth2 client secret
       --api-key KEY         API key for API_KEY providers
+      --scope SCOPE         Single OAuth2 scope (can be specified multiple times)
+      --scopes SCOPES       Comma-separated list of OAuth2 scopes
 
   ## Examples
 
       # Create OAuth2 provider
       mix tango.providers.create github --client-id=xxx --client-secret=yyy
       mix tango.providers.create google --client-id=xxx --client-secret=yyy
+
+      # Create OAuth2 provider with custom scopes (multiple ways)
+      mix tango.providers.create google --client-id=xxx --client-secret=yyy --scope=https://www.googleapis.com/auth/calendar --scope=https://www.googleapis.com/auth/userinfo.email
+      mix tango.providers.create google --client-id=xxx --client-secret=yyy --scopes="https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/userinfo.email"
 
       # Create API key provider
       mix tango.providers.create stripe --api-key=sk_live_xxx
@@ -34,7 +40,9 @@ defmodule Mix.Tasks.Tango.Providers.Create do
   @switches [
     client_id: :string,
     client_secret: :string,
-    api_key: :string
+    api_key: :string,
+    scope: :keep,
+    scopes: :string
   ]
 
   def run([provider_name | _] = args) when is_binary(provider_name) do
@@ -67,12 +75,14 @@ defmodule Mix.Tasks.Tango.Providers.Create do
           Shell.error("❌ Provider '#{provider_name}' uses API key authentication")
           Shell.info("   Use: mix tango.providers.create #{provider_name} --api-key=xxx")
         else
-          config_with_credentials =
-            nango_config
-            |> put_in(["client_id"], opts[:client_id])
-            |> put_in(["client_secret"], opts[:client_secret])
+          # Parse and combine scopes from catalog and user input
+          combined_scopes = ProviderHelper.parse_scopes(nango_config, opts)
 
-          case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
+          case Tango.Provider.create_provider_from_nango(provider_name, nango_config,
+                 client_id: opts[:client_id],
+                 client_secret: opts[:client_secret],
+                 default_scopes: combined_scopes
+               ) do
             {:ok, provider} ->
               ProviderHelper.display_provider_success(provider, "OAuth2")
 

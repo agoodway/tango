@@ -73,7 +73,12 @@ defmodule Tango.Schemas.Provider do
       name: nango_config["display_name"] || name,
       config: config,
       client_secret: client_secret,
-      default_scopes: nango_config["scopes"] || nango_config["default_scopes"] || [],
+      default_scopes:
+        Keyword.get(
+          opts,
+          :default_scopes,
+          nango_config["scopes"] || nango_config["default_scopes"] || []
+        ),
       active: Keyword.get(opts, :active, true),
       metadata: build_metadata(nango_config)
     }

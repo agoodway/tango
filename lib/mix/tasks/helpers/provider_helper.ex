@@ -87,6 +87,35 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   end
 
   @doc """
+  Parses and combines OAuth2 scopes from command line options.
+
+  Handles both --scope (individual, can be repeated) and --scopes (comma-separated)
+  options, combining them with any default scopes from the catalog.
+  """
+  def parse_scopes(nango_config, opts) do
+    # Get catalog default scopes
+    catalog_scopes = nango_config["scopes"] || nango_config["default_scopes"] || []
+
+    # Parse user scopes from both --scope and --scopes options
+    individual_scopes = List.wrap(opts[:scope] || [])
+
+    comma_separated_scopes =
+      case opts[:scopes] do
+        nil ->
+          []
+
+        scopes_string ->
+          scopes_string
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+      end
+
+    user_scopes = individual_scopes ++ comma_separated_scopes
+    catalog_scopes ++ user_scopes
+  end
+
+  @doc """
   Creates OAuth2 provider from catalog configuration.
   """
   def create_oauth2_provider_from_config(provider_name, nango_config, credentials) do
