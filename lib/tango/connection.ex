@@ -107,6 +107,42 @@ defmodule Tango.Connection do
   end
 
   @doc """
+  Gets an active connection for provider and tenant with optional auto-refresh.
+
+  Provider is identified by slug, not name. When auto_refresh is true,
+  automatically refreshes the token if it's about to expire (within 5 minutes).
+
+  ## Examples
+
+      iex> get_connection_for_provider("github", "user-123", auto_refresh: true)
+      {:ok, %Connection{}}  # Token automatically refreshed if needed
+
+      iex> get_connection_for_provider("google", "user-123", auto_refresh: false)
+      {:ok, %Connection{}}  # Token returned as-is, even if expired
+
+  """
+  def get_connection_for_provider(provider_slug, tenant_id, opts)
+      when is_binary(provider_slug) and is_binary(tenant_id) and is_list(opts) do
+    auto_refresh = Keyword.get(opts, :auto_refresh, false)
+
+    with {:ok, connection} <- get_connection_for_provider(provider_slug, tenant_id) do
+      if auto_refresh and Connection.needs_refresh?(connection) and
+           Connection.can_refresh?(connection) do
+        case refresh_connection(connection) do
+          {:ok, refreshed_connection} ->
+            {:ok, refreshed_connection}
+
+          {:error, _refresh_error} ->
+            # Return original connection if refresh fails - let caller handle expired token
+            {:ok, connection}
+        end
+      else
+        {:ok, connection}
+      end
+    end
+  end
+
+  @doc """
   Updates connection usage timestamp.
 
   Should be called when connection is used for API requests.

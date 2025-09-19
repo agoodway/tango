@@ -176,6 +176,96 @@ defmodule Tango.ConnectionTest do
     end
   end
 
+  describe "get_connection_for_provider/3 with auto_refresh" do
+    test "returns connection without refresh when auto_refresh is false" do
+      provider = Factory.create_github_provider("_auto_refresh_false")
+      tenant_id = "tenant_auto_refresh_false_test"
+
+      # Create an active connection that expires soon (needs refresh)
+      conn = Factory.create_github_connection(provider, tenant_id)
+      expires_soon = DateTime.add(DateTime.utc_now(), 60, :second)
+
+      changeset = ConnectionSchema.changeset(conn, %{expires_at: expires_soon})
+      {:ok, expiring_conn} = Repo.update(changeset)
+
+      # Should return connection without refresh attempt
+      assert {:ok, retrieved} =
+               Tango.Connection.get_connection_for_provider(provider.name, tenant_id,
+                 auto_refresh: false
+               )
+
+      assert retrieved.id == expiring_conn.id
+      assert retrieved.access_token == expiring_conn.access_token
+    end
+
+    test "automatically refreshes expiring connection when auto_refresh is true" do
+      provider = Factory.create_github_provider("_auto_refresh_true")
+      tenant_id = "tenant_auto_refresh_true_test"
+
+      # Create an active connection that expires soon but remove refresh token to avoid OAuth2 call
+      conn = Factory.create_github_connection(provider, tenant_id)
+      expires_soon = DateTime.add(DateTime.utc_now(), 60, :second)
+
+      changeset =
+        ConnectionSchema.changeset(conn, %{
+          expires_at: expires_soon,
+          # Remove refresh token to skip actual OAuth2 call
+          refresh_token: nil
+        })
+
+      {:ok, expiring_conn} = Repo.update(changeset)
+
+      # Should detect that refresh is needed but skip it due to no refresh token
+      assert {:ok, retrieved} =
+               Tango.Connection.get_connection_for_provider(provider.name, tenant_id,
+                 auto_refresh: true
+               )
+
+      assert retrieved.id == expiring_conn.id
+      assert retrieved.tenant_id == tenant_id
+    end
+
+    test "falls back gracefully when refresh fails" do
+      provider = Factory.create_github_provider("_auto_refresh_fallback")
+      tenant_id = "tenant_auto_refresh_fallback_test"
+
+      # Create an active connection that expires soon but can't be refreshed
+      conn = Factory.create_github_connection(provider, tenant_id)
+      expires_soon = DateTime.add(DateTime.utc_now(), 60, :second)
+
+      changeset =
+        ConnectionSchema.changeset(conn, %{
+          expires_at: expires_soon,
+          # No refresh token available
+          refresh_token: nil
+        })
+
+      {:ok, expiring_conn} = Repo.update(changeset)
+
+      # Should return original connection even if refresh would fail
+      assert {:ok, retrieved} =
+               Tango.Connection.get_connection_for_provider(provider.name, tenant_id,
+                 auto_refresh: true
+               )
+
+      assert retrieved.id == expiring_conn.id
+      assert retrieved.tenant_id == tenant_id
+    end
+
+    test "uses default behavior when auto_refresh option not provided" do
+      provider = Factory.create_github_provider("_auto_refresh_default")
+      tenant_id = "tenant_auto_refresh_default_test"
+
+      conn = Factory.create_github_connection(provider, tenant_id)
+
+      # Should work with empty options list (default auto_refresh: false)
+      assert {:ok, retrieved} =
+               Tango.Connection.get_connection_for_provider(provider.name, tenant_id, [])
+
+      assert retrieved.id == conn.id
+    end
+  end
+
   describe "mark_connection_used/1" do
     test "updates last_used_at timestamp" do
       provider = Factory.create_github_provider("_used")

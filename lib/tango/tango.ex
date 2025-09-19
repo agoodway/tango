@@ -33,7 +33,7 @@ defmodule Tango do
       iex> Tango.create_session("github", "user-123")
       {:ok, %Tango.Schemas.OAuthSession{}}
 
-      iex> Tango.create_session("nonexistent", "user-123")  
+      iex> Tango.create_session("nonexistent", "user-123")
       {:error, :provider_not_found}
 
   """
@@ -186,8 +186,12 @@ defmodule Tango do
       iex> Tango.get_connection_for_provider("github", "user-123")
       {:ok, %Tango.Schemas.Connection{}}
 
+      iex> Tango.get_connection_for_provider("github", "user-123", auto_refresh: true)
+      {:ok, %Tango.Schemas.Connection{}}  # Automatically refreshed if needed
+
   """
   defdelegate get_connection_for_provider(provider_name, tenant_id), to: Tango.Connection
+  defdelegate get_connection_for_provider(provider_name, tenant_id, opts), to: Tango.Connection
 
   @doc """
   Refreshes an OAuth connection's access token.
