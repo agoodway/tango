@@ -180,12 +180,14 @@ defmodule Tango.Auth do
            {:ok, session} <- get_session_by_state(original_state, tenant_id),
            :ok <- OAuthSession.validate_state(session, original_state),
            :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]) do
+        Logger.info("Tango OAuth validation complete: session_id=#{session.id}, redirect_uri=#{validated_opts[:redirect_uri]}")
         {:ok, %{session: session, validated_opts: validated_opts}}
       else
         {:error, error} when is_atom(error) ->
+          Logger.error("Tango OAuth validation failed: #{inspect(error)}")
           {:error, error}
 
-        _error ->
+        error ->
           {:error, :invalid_state}
       end
     end)
@@ -198,9 +200,18 @@ defmodule Tango.Auth do
                                           } ->
       with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
            {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
+           _ <- Logger.info("Tango OAuth performing token exchange with Google for provider=#{provider.slug}"),
            {:ok, token_response} <-
              perform_token_exchange(oauth_config, session, authorization_code, validated_opts) do
+        Logger.info("Tango OAuth token exchange successful")
         {:ok, %{provider: provider, token_response: token_response}}
+      else
+        {:error, reason} = error ->
+          Logger.error("Tango OAuth token exchange step failed: #{inspect(reason)}")
+          error
+        result ->
+          Logger.error("Tango OAuth token exchange invalid result: #{inspect(result)}")
+          {:error, :token_exchange_failed}
       end
     end)
     |> Ecto.Multi.run(:create_connection, fn repo,
@@ -343,12 +354,18 @@ defmodule Tango.Auth do
   defp perform_token_exchange(oauth_config, session, authorization_code, opts) do
     with client <- build_oauth_client(oauth_config, opts),
          token_params <- build_token_params(authorization_code, session),
+         _ <- Logger.info("Tango OAuth token exchange params: redirect_uri=#{token_params[:redirect_uri]}, code=#{String.slice(authorization_code, 0, 10)}..."),
          {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
          :ok <- validate_access_token(token.access_token) do
+      Logger.info("Tango OAuth token exchange with Google successful")
       {:ok, convert_token_to_response(token)}
     else
-      {:error, %OAuth2.Error{reason: reason}} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+      {:error, %OAuth2.Error{reason: reason}} -> 
+        Logger.error("Tango OAuth2 error from Google: #{inspect(reason)}")
+        {:error, reason}
+      {:error, reason} -> 
+        Logger.error("Tango OAuth token exchange error: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
@@ -558,17 +575,25 @@ defmodule Tango.Auth do
   def perform_callback_exchange(_conn, _code, nil), do: nil
 
   def perform_callback_exchange(conn, code, state) do
+    Logger.info("Tango OAuth callback exchange starting: code=#{String.slice(code || "nil", 0, 10)}..., state=#{String.slice(state || "nil", 0, 20)}...")
+    
     with {:ok, tenant_id, original_state} <- decode_state_safely(state),
          {:ok, session} <- get_session_by_state(original_state, tenant_id),
          callback_url <- session.redirect_uri || build_https_callback_url(conn),
+         _ <- Logger.info("Tango OAuth using callback_url=#{callback_url}, session.redirect_uri=#{session.redirect_uri}"),
          {:ok, connection} <-
            exchange_code(state, code, tenant_id, redirect_uri: callback_url),
          {:ok, provider} <- Tango.get_provider_by_id(connection.provider_id),
          access_token <- Connection.get_raw_access_token(connection) do
+      Logger.info("Tango OAuth exchange successful")
       {:ok, build_connection_response(connection, provider, access_token)}
     else
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :invalid_state}
+      {:error, reason} = error -> 
+        Logger.error("Tango OAuth exchange failed: #{inspect(reason)}")
+        error
+      result -> 
+        Logger.error("Tango OAuth exchange invalid result: #{inspect(result)}")
+        {:error, :invalid_state}
     end
   end
 
