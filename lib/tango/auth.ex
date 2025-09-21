@@ -712,17 +712,22 @@ defmodule Tango.Auth do
 
               // Use server-side exchange result instead of making API calls
               const exchangeResult = #{result_json};
+              console.log('Tango callback - exchangeResult:', exchangeResult);
 
               if (!exchangeResult) {
+                console.error('Tango callback - No exchange result');
                 throw new Error('Missing authorization code or state parameter');
               }
 
               if (exchangeResult.error) {
+                console.error('Tango callback - Exchange error:', exchangeResult.error);
                 throw new Error(exchangeResult.error);
               }
 
               // Send success result to parent window
               if (window.opener) {
+                console.log('Tango callback - Sending postMessage to opener');
+                console.log('Tango callback - Current origin:', window.location.origin);
                 window.opener.postMessage({
                   type: 'oauth_complete',
                   connection: {
@@ -733,6 +738,9 @@ defmodule Tango.Auth do
                     token: exchangeResult.access_token
                   }
                 }, '*');
+                console.log('Tango callback - PostMessage sent successfully');
+              } else {
+                console.error('Tango callback - No window.opener found');
               }
 
               document.getElementById('status').textContent = 'OAuth flow completed successfully. You can close this window.';
