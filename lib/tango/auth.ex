@@ -7,6 +7,7 @@ defmodule Tango.Auth do
   """
 
   import Ecto.Query, warn: false
+  require Logger
 
   # Repo will be configured by the host application
   @repo Application.compile_env(:tango, :repo, Tango.Repo)
@@ -429,8 +430,12 @@ defmodule Tango.Auth do
         # Same redirect_uri, no update needed
         {:ok, session}
 
-      _different ->
+      _different_redirect_uri ->
         # Different redirect_uri, this is a binding violation
+        Logger.error(
+          "OAuth redirect_uri mismatch in session update: stored=#{session.redirect_uri}, provided=#{redirect_uri}, session_id=#{session.id}, tenant_id=#{session.tenant_id}"
+        )
+
         {:error, :redirect_uri_mismatch}
     end
   end
@@ -450,12 +455,20 @@ defmodule Tango.Auth do
         # We'll allow this but ideally the full OAuth flow should be used
         :ok
 
-      {_stored, nil} ->
+      {stored, nil} ->
         # Session was created with redirect_uri, but none provided in exchange
+        Logger.error(
+          "OAuth redirect_uri binding violation - nil provided: stored=#{stored}, session_id=#{session.id}, tenant_id=#{session.tenant_id}"
+        )
+
         {:error, :redirect_uri_binding_violation}
 
-      {_stored, _provided} ->
+      {stored, provided} ->
         # redirect_uri mismatch
+        Logger.error(
+          "OAuth redirect_uri binding violation - mismatch: stored=#{stored}, provided=#{provided}, session_id=#{session.id}, tenant_id=#{session.tenant_id}"
+        )
+
         {:error, :redirect_uri_mismatch}
     end
   end
@@ -545,8 +558,9 @@ defmodule Tango.Auth do
   def perform_callback_exchange(_conn, _code, nil), do: nil
 
   def perform_callback_exchange(conn, code, state) do
-    with {:ok, tenant_id, _original_state} <- decode_state_safely(state),
-         callback_url <- build_https_callback_url(conn),
+    with {:ok, tenant_id, original_state} <- decode_state_safely(state),
+         {:ok, session} <- get_session_by_state(original_state, tenant_id),
+         callback_url <- session.redirect_uri || build_https_callback_url(conn),
          {:ok, connection} <-
            exchange_code(state, code, tenant_id, redirect_uri: callback_url),
          {:ok, provider} <- Tango.get_provider_by_id(connection.provider_id),
