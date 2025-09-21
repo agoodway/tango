@@ -190,7 +190,7 @@ defmodule Tango.Auth do
           Logger.error("Tango OAuth validation failed: #{inspect(error)}")
           {:error, error}
 
-        error ->
+        _error ->
           {:error, :invalid_state}
       end
     end)
@@ -359,12 +359,11 @@ defmodule Tango.Auth do
   end
 
   defp perform_token_exchange(oauth_config, session, authorization_code, opts) do
+    validated_redirect_uri = Keyword.get(opts, :redirect_uri)
+
     with client <- build_oauth_client(oauth_config, opts),
-         token_params <- build_token_params(authorization_code, session),
-         _ <-
-           Logger.info(
-             "Tango OAuth token exchange params: redirect_uri=#{token_params[:redirect_uri]}, code=#{String.slice(authorization_code, 0, 10)}..."
-           ),
+         token_params <- build_token_params(authorization_code, session, validated_redirect_uri),
+         _ <- log_token_exchange_params(token_params, session),
          {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
          :ok <- validate_access_token(token.access_token) do
       Logger.info("Tango OAuth token exchange with Google successful")
@@ -389,13 +388,66 @@ defmodule Tango.Auth do
     )
   end
 
-  defp build_token_params(authorization_code, session) do
+  defp build_token_params(
+         authorization_code,
+         %{code_verifier: nil} = session,
+         validated_redirect_uri
+       ) do
     base_params = [code: authorization_code, grant_type: "authorization_code"]
+    add_redirect_uri_if_present(base_params, session, validated_redirect_uri)
+  end
 
-    case session.code_verifier do
-      nil -> base_params
-      verifier -> Keyword.put(base_params, :code_verifier, verifier)
+  defp build_token_params(
+         authorization_code,
+         %{code_verifier: verifier} = session,
+         validated_redirect_uri
+       ) do
+    base_params = [
+      code: authorization_code,
+      grant_type: "authorization_code",
+      code_verifier: verifier
+    ]
+
+    add_redirect_uri_if_present(base_params, session, validated_redirect_uri)
+  end
+
+  defp add_redirect_uri_if_present(params, session, validated_redirect_uri) do
+    redirect_uri = session.redirect_uri || validated_redirect_uri
+
+    case should_include_redirect_uri?(redirect_uri) do
+      true -> Keyword.put(params, :redirect_uri, redirect_uri)
+      false -> params
     end
+  end
+
+  defp should_include_redirect_uri?(nil), do: false
+
+  defp should_include_redirect_uri?(uri) when is_binary(uri) do
+    trimmed = String.trim(uri)
+    trimmed != ""
+  end
+
+  defp should_include_redirect_uri?(_), do: false
+
+  defp log_token_exchange_params(params, session) do
+    redirect_uri_status =
+      case Keyword.get(params, :redirect_uri) do
+        nil -> "omitted"
+        uri -> "included: #{String.slice(uri, 0, 50)}..."
+      end
+
+    session_redirect_uri =
+      case session.redirect_uri do
+        nil -> "nil"
+        "" -> "empty"
+        uri -> String.slice(uri, 0, 50) <> "..."
+      end
+
+    Logger.info(
+      "Tango OAuth token exchange params: redirect_uri #{redirect_uri_status}, " <>
+        "session.redirect_uri: #{session_redirect_uri}, " <>
+        "code: #{String.slice(Keyword.get(params, :code, ""), 0, 10)}..."
+    )
   end
 
   @doc false
@@ -788,6 +840,7 @@ defmodule Tango.Auth do
               if (window.opener) {
                 console.log('Tango callback - Sending postMessage to opener');
                 console.log('Tango callback - Current origin:', window.location.origin);
+                console.log('Tango callback - Opener origin:', window.opener.origin);
                 window.opener.postMessage({
                   type: 'oauth_complete',
                   connection: {
@@ -797,7 +850,7 @@ defmodule Tango.Auth do
                     expires_at: exchangeResult.expires_at,
                     token: exchangeResult.access_token
                   }
-                }, '*');
+                }, window.opener.origin);
                 console.log('Tango callback - PostMessage sent successfully');
               } else {
                 console.error('Tango callback - No window.opener found');
@@ -813,7 +866,7 @@ defmodule Tango.Auth do
                 window.opener.postMessage({
                   type: 'oauth_error',
                   error: error.message
-                }, '*');
+                }, window.opener.origin);
               }
 
               document.getElementById('status').textContent = 'OAuth flow failed: ' + error.message;

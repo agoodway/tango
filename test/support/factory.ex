@@ -46,6 +46,24 @@ defmodule Tango.Factory do
   Options:
   - `:urls` - Map with "auth_url" and "token_url" keys to override default URLs
   """
+  def create_provider(provider_name, port) when is_binary(provider_name) and is_integer(port) do
+    suffix = "_#{port}"
+    base_url = "http://localhost:#{port}"
+
+    create_provider(%{
+      name: "#{provider_name}_test#{suffix}",
+      slug: "#{provider_name}_test#{suffix}",
+      auth_mode: "oauth2",
+      client_secret: "#{provider_name}_client_secret#{suffix}",
+      config: %{
+        "display_name" => "#{String.capitalize(provider_name)} Test#{suffix}",
+        "client_id" => "#{provider_name}_client_id#{suffix}",
+        "auth_url" => "#{base_url}/login/oauth/authorize",
+        "token_url" => "#{base_url}/login/oauth/access_token"
+      }
+    })
+  end
+
   def create_github_provider(suffix \\ "", opts \\ []) do
     urls =
       Keyword.get(opts, :urls, %{

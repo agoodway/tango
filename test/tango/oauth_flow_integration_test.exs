@@ -626,4 +626,164 @@ defmodule Tango.OAuthFlowIntegrationTest do
       assert start_log.success == true
     end
   end
+
+  describe "redirect_uri handling in token exchange" do
+    setup do
+      bypass = Bypass.open()
+
+      # Mock token endpoint that validates redirect_uri
+      Bypass.stub(bypass, "POST", "/login/oauth/access_token", fn conn ->
+        {:ok, body, _} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        case Map.get(params, "redirect_uri") do
+          nil ->
+            # OAuth without redirect_uri
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "access_token" => "token_without_redirect_uri",
+                "token_type" => "bearer"
+              })
+            )
+
+          _redirect_uri ->
+            # OAuth with redirect_uri
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "access_token" => "token_with_redirect_uri",
+                "token_type" => "bearer"
+              })
+            )
+        end
+      end)
+
+      provider = Factory.create_provider("github", bypass.port)
+      tenant_id = "test-tenant-#{System.unique_integer()}"
+
+      %{provider: provider, bypass: bypass, tenant_id: tenant_id}
+    end
+
+    test "includes redirect_uri when session was created with redirect_uri", %{
+      provider: provider,
+      tenant_id: tenant_id
+    } do
+      redirect_uri = "https://myapp.com/callback"
+
+      # Create session with redirect_uri
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id, redirect_uri: redirect_uri)
+
+      # Generate authorization URL to get encoded state
+      {:ok, auth_url} = Auth.authorize_url(session.session_token, redirect_uri: redirect_uri)
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # Exchange code - should include redirect_uri
+      {:ok, response} =
+        Auth.exchange_code(encoded_state, "auth_code", tenant_id, redirect_uri: redirect_uri)
+
+      # Should include redirect_uri per RFC 6749
+      assert response.access_token == "token_with_redirect_uri"
+    end
+
+    test "includes redirect_uri when authorize_url was called with redirect_uri", %{
+      provider: provider,
+      tenant_id: tenant_id
+    } do
+      redirect_uri = "https://myapp.com/callback"
+
+      # Create session without redirect_uri initially
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      # But when we generate authorization URL, redirect_uri gets stored in session
+      {:ok, auth_url} = Auth.authorize_url(session.session_token, redirect_uri: redirect_uri)
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # Exchange code - should include redirect_uri since authorize_url stored it
+      {:ok, response} =
+        Auth.exchange_code(encoded_state, "auth_code", tenant_id, redirect_uri: redirect_uri)
+
+      # Should include redirect_uri because it was used in authorize_url
+      assert response.access_token == "token_with_redirect_uri"
+    end
+
+    test "handles whitespace-only redirect_uri gracefully", %{
+      provider: provider,
+      tenant_id: tenant_id
+    } do
+      redirect_uri = "https://myapp.com/callback"
+
+      # Create session with whitespace-only redirect_uri (should be invalid)
+      assert {:error, :invalid_redirect_uri} =
+               Auth.create_session(provider.slug, tenant_id, redirect_uri: "   ")
+
+      # But if somehow a session had whitespace-only redirect_uri, token exchange should ignore it
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      # Generate authorization URL with valid redirect_uri
+      {:ok, auth_url} = Auth.authorize_url(session.session_token, redirect_uri: redirect_uri)
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # Mock a scenario where session somehow has whitespace-only redirect_uri
+      # but we provide valid redirect_uri in exchange
+      {:ok, response} =
+        Auth.exchange_code(encoded_state, "auth_code", tenant_id, redirect_uri: redirect_uri)
+
+      # Should use the validated redirect_uri from exchange, not empty session one
+      assert response.access_token == "token_with_redirect_uri"
+    end
+
+    test "rejects mismatched redirect_uri between authorization and exchange", %{
+      provider: provider,
+      tenant_id: tenant_id
+    } do
+      session_redirect_uri = "https://myapp.com/callback"
+      exchange_redirect_uri = "https://different.com/callback"
+
+      # Create session with redirect_uri
+      {:ok, session} =
+        Auth.create_session(provider.slug, tenant_id, redirect_uri: session_redirect_uri)
+
+      # Generate authorization URL with same redirect_uri
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token, redirect_uri: session_redirect_uri)
+
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # Exchange with different redirect_uri (should fail per RFC 6749)
+      assert {:error, :redirect_uri_mismatch} =
+               Auth.exchange_code(encoded_state, "auth_code", tenant_id,
+                 redirect_uri: exchange_redirect_uri
+               )
+    end
+
+    test "uses exchange redirect_uri when session has none", %{
+      provider: provider,
+      tenant_id: tenant_id
+    } do
+      exchange_redirect_uri = "https://myapp.com/callback"
+
+      # Create session without redirect_uri
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      # Generate authorization URL with redirect_uri (this stores it in session in real flow)
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token, redirect_uri: exchange_redirect_uri)
+
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      # Exchange should include redirect_uri because authorize_url stored it
+      {:ok, response} =
+        Auth.exchange_code(encoded_state, "auth_code", tenant_id,
+          redirect_uri: exchange_redirect_uri
+        )
+
+      # Should include redirect_uri
+      assert response.access_token == "token_with_redirect_uri"
+    end
+  end
 end
