@@ -11,7 +11,8 @@ defmodule Tango.Application do
 
     # Add TestRepo in test environment for library testing
     children =
-      if Code.ensure_loaded?(Tango.TestRepo) and function_exported?(Tango.TestRepo, :__adapter__, 0) do
+      if Code.ensure_loaded?(Tango.TestRepo) and
+           function_exported?(Tango.TestRepo, :__adapter__, 0) do
         children ++ [Tango.TestRepo]
       else
         children

@@ -75,25 +75,13 @@ defmodule Tango.API.CORSPlug do
   defp origin_allowed?(origin) do
     # Default to no origins for security - must be explicitly configured
     # Use "*" in production only when intentionally needed
-    allowed_origins = get_cors_config(:cors_origins, get_default_cors_origins())
+    allowed_origins = get_cors_config(:cors_origins, [])
 
     cond do
       "*" in allowed_origins -> true
       origin in allowed_origins -> true
       Enum.any?(allowed_origins, &origin_matches_pattern?(&1, origin)) -> true
       true -> false
-    end
-  end
-
-  # Default CORS origins based on environment - secure by default
-  defp get_default_cors_origins do
-    case Mix.env() do
-      # Allow wildcard in dev
-      :dev -> ["http://localhost:3000", "http://localhost:8080", "*"]
-      # Allow wildcard in test
-      :test -> ["http://localhost:3000", "*"]
-      # Production requires explicit configuration
-      _ -> []
     end
   end
 
