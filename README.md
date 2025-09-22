@@ -123,38 +123,119 @@ Otherwise, if not using Ecto migrations, you can copy the SQL from `priv/repo/sq
 
 Providers are sourced from the [Nango catalog](https://docs.nango.dev/integrations/overview) with pre-configured OAuth endpoints and settings.
 
+### Mix Tasks
+
+Use mix tasks for provider management with built-in validation and error handling:
+
 ```bash
-# Show provider details
+# Show provider details from catalog
 mix tango.providers.show github
 
-# Create provider from catalog
-mix tango.providers.create github --client-id=xxx --client-secret=yyy
+# Create OAuth2 provider with single scope
+mix tango.providers.create github --client-id=your_client_id --client-secret=your_secret
+
+# Create OAuth2 provider with multiple scopes (individual --scope flags)
+mix tango.providers.create microsoft \
+  --client-id="your_azure_client_id" \
+  --client-secret="your_azure_client_secret" \
+  --scope="Calendars.Read" \
+  --scope="Calendars.ReadWrite" \
+  --scope="User.Read" \
+  --scope="offline_access"
+
+# Create OAuth2 provider with comma-separated scopes
+mix tango.providers.create google \
+  --client-id="your_google_client_id" \
+  --client-secret="your_google_client_secret" \
+  --scopes="https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/userinfo.email"
+
+# Create API key provider
 mix tango.providers.create stripe --api-key=sk_live_xxx
 
-# Sync providers from catalog to database
+# Sync all providers from catalog to database
 mix tango.providers.sync
+```
+
+### Programmatic Creation
+
+For dynamic provider creation in your application code:
+
+```elixir
+# OAuth2 provider using catalog configuration
+{:ok, nango_config} = Tango.Catalog.get_provider("github")
+
+client_id = "your_github_client_id"
+
+{:ok, provider} = Tango.create_provider(%{
+  name: nango_config["display_name"] || "GitHub",
+  slug: "github",
+  client_secret: "your_github_client_secret",
+  config: Map.merge(nango_config, %{
+    "client_id" => client_id
+  }),
+  default_scopes: ["user:email", "repo"],
+  active: true,
+  metadata: nango_config["metadata"] || %{}
+})
+
+# Custom provider without catalog
+{:ok, provider} = Tango.create_provider(%{
+  name: "Custom API",
+  slug: "custom_api",
+  client_secret: "your_client_secret",
+  config: %{
+    "client_id" => "your_client_id",
+    "auth_url" => "https://api.example.com/oauth/authorize",
+    "token_url" => "https://api.example.com/oauth/token",
+    "auth_mode" => "OAUTH2"
+  },
+  default_scopes: ["read", "write"],
+  active: true
+})
+
+# API key provider
+{:ok, provider} = Tango.create_provider(%{
+  name: "Custom API Key Service",
+  slug: "custom_service",
+  config: %{
+    "auth_mode" => "API_KEY",
+    "api_config" => %{
+      "headers" => %{
+        "authorization" => "Bearer ${api_key}"
+      }
+    }
+  },
+  api_key: "your_api_key",
+  active: true
+})
 ```
 
 ## Quick Start
 
 ### 1. Set up OAuth Provider
 
-```elixir
-# Create OAuth2 provider
+```bash
+# Create OAuth2 provider using mix task (recommended)
 mix tango.providers.create github --client-id=your_client_id --client-secret=your_secret
 
 # Create API key provider
 mix tango.providers.create stripe --api-key=sk_live_xxx
+```
 
-# Or programmatically
+```elixir
+# Or programmatically using catalog configuration
+{:ok, nango_config} = Tango.Catalog.get_provider("github")
+
 {:ok, provider} = Tango.create_provider(%{
-  name: "github",
-  config: %{
-    "client_id" => "your_client_id",
-    "auth_url" => "https://github.com/login/oauth/authorize",
-    "token_url" => "https://github.com/login/oauth/access_token"
-  },
-  client_secret: "your_client_secret"
+  name: nango_config["display_name"] || "GitHub",
+  slug: "github",
+  client_secret: "your_client_secret",
+  config: Map.merge(nango_config, %{
+    "client_id" => "your_client_id"
+  }),
+  default_scopes: ["user:email", "repo"],
+  active: true,
+  metadata: nango_config["metadata"] || %{}
 })
 ```
 

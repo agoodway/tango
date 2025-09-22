@@ -132,4 +132,91 @@ defmodule Mix.Tasks.Helpers.ProviderHelperValidationTest do
       assert output =~ "mix tango.providers.create stripe --api-key=sk_live_xxx"
     end
   end
+
+  describe "parse_scopes/2" do
+    test "parses multiple individual scopes correctly" do
+      nango_config = %{"default_scopes" => ["offline_access", ".default"]}
+
+      # Simulate OptionParser output with :keep for multiple --scope arguments
+      opts = [
+        scope: "Calendars.Read",
+        scope: "Calendars.ReadWrite",
+        scope: "User.Read",
+        client_id: "test",
+        client_secret: "test"
+      ]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["Calendars.Read", "Calendars.ReadWrite", "User.Read"]
+    end
+
+    test "parses comma-separated scopes correctly" do
+      nango_config = %{"default_scopes" => ["offline_access"]}
+      opts = [scopes: "Calendars.Read,Calendars.ReadWrite,User.Read"]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["Calendars.Read", "Calendars.ReadWrite", "User.Read"]
+    end
+
+    test "combines individual and comma-separated scopes" do
+      nango_config = %{}
+
+      opts = [
+        scope: "Calendars.Read",
+        scope: "User.Read",
+        scopes: "offline_access,Calendars.ReadWrite"
+      ]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["Calendars.Read", "User.Read", "offline_access", "Calendars.ReadWrite"]
+    end
+
+    test "uses catalog scopes when no user scopes provided" do
+      nango_config = %{"default_scopes" => ["offline_access", ".default"]}
+      opts = []
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["offline_access", ".default"]
+    end
+
+    test "user scopes override catalog scopes when provided" do
+      nango_config = %{"default_scopes" => ["offline_access", ".default"]}
+      opts = [scope: "Calendars.ReadWrite", scope: "User.Read"]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["Calendars.ReadWrite", "User.Read"]
+    end
+
+    test "handles empty and whitespace-only scopes in comma-separated list" do
+      nango_config = %{}
+      opts = [scopes: "Calendars.Read, , User.Read,  ,offline_access"]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["Calendars.Read", "User.Read", "offline_access"]
+    end
+
+    test "handles missing scopes gracefully" do
+      nango_config = %{}
+      opts = [client_id: "test", client_secret: "test"]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == []
+    end
+
+    test "handles catalog config without default_scopes" do
+      nango_config = %{"auth_mode" => "OAUTH2"}
+      opts = [scope: "User.Read"]
+
+      result = ProviderHelper.parse_scopes(nango_config, opts)
+
+      assert result == ["User.Read"]
+    end
+  end
 end

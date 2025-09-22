@@ -97,7 +97,11 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
     catalog_scopes = nango_config["scopes"] || nango_config["default_scopes"] || []
 
     # Parse user scopes from both --scope and --scopes options
-    individual_scopes = List.wrap(opts[:scope] || [])
+    # When using :keep, we need to get all scope values from the keyword list
+    individual_scopes =
+      opts
+      |> Keyword.get_values(:scope)
+      |> List.flatten()
 
     comma_separated_scopes =
       case opts[:scopes] do
@@ -112,7 +116,14 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
       end
 
     user_scopes = individual_scopes ++ comma_separated_scopes
-    catalog_scopes ++ user_scopes
+
+    # If user provided scopes, use those instead of catalog defaults
+    # Otherwise use catalog defaults
+    if length(user_scopes) > 0 do
+      user_scopes
+    else
+      catalog_scopes
+    end
   end
 
   @doc """
