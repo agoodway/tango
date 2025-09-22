@@ -204,9 +204,7 @@ defmodule Tango.Auth do
       with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
            {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
            _ <-
-             Logger.info(
-               "Tango OAuth performing token exchange with Google for provider=#{provider.slug}"
-             ),
+             Logger.info("Tango OAuth performing token exchange for provider=#{provider.slug}"),
            {:ok, token_response} <-
              perform_token_exchange(oauth_config, session, authorization_code, validated_opts) do
         Logger.info("Tango OAuth token exchange successful")
@@ -366,11 +364,11 @@ defmodule Tango.Auth do
          _ <- log_token_exchange_params(token_params, session),
          {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
          :ok <- validate_access_token(token.access_token) do
-      Logger.info("Tango OAuth token exchange with Google successful")
+      Logger.info("Tango OAuth token exchange successful")
       {:ok, convert_token_to_response(token)}
     else
       {:error, %OAuth2.Error{reason: reason}} ->
-        Logger.error("Tango OAuth2 error from Google: #{inspect(reason)}")
+        Logger.error("Tango OAuth2 error: #{inspect(reason)}")
         {:error, reason}
 
       {:error, reason} ->
@@ -792,7 +790,7 @@ defmodule Tango.Auth do
     result_json =
       case exchange_result do
         {:ok, data} -> Jason.encode!(data)
-        {:error, reason} -> Jason.encode!(%{error: to_string(reason)})
+        {:error, reason} -> Jason.encode!(%{error: format_error_reason(reason)})
         nil -> "null"
       end
       |> html_escape_json()
@@ -840,18 +838,43 @@ defmodule Tango.Auth do
               if (window.opener) {
                 console.log('Tango callback - Sending postMessage to opener');
                 console.log('Tango callback - Current origin:', window.location.origin);
-                console.log('Tango callback - Opener origin:', window.opener.origin);
-                window.opener.postMessage({
-                  type: 'oauth_complete',
-                  connection: {
-                    provider: exchangeResult.provider,
-                    status: exchangeResult.status,
-                    scopes: exchangeResult.scopes,
-                    expires_at: exchangeResult.expires_at,
-                    token: exchangeResult.access_token
-                  }
-                }, window.opener.origin);
-                console.log('Tango callback - PostMessage sent successfully');
+                
+                try {
+                  const targetOrigin = window.opener.location.origin;
+                  console.log('Tango callback - Target origin:', targetOrigin);
+                  
+                  window.opener.postMessage({
+                    type: 'oauth_complete',
+                    connection: {
+                      provider: exchangeResult.provider,
+                      status: exchangeResult.status,
+                      scopes: exchangeResult.scopes || [],
+                      expires_at: exchangeResult.expires_at,
+                      token: exchangeResult.access_token
+                    }
+                  }, targetOrigin);
+                  console.log('Tango callback - PostMessage sent successfully');
+                  
+                  // Close popup after successful message
+                  setTimeout(() => window.close(), 100);
+                } catch (originError) {
+                  console.error('Tango callback - Could not access opener origin:', originError);
+                  // Fallback to wildcard origin (less secure but functional)
+                  window.opener.postMessage({
+                    type: 'oauth_complete',
+                    connection: {
+                      provider: exchangeResult.provider,
+                      status: exchangeResult.status,
+                      scopes: exchangeResult.scopes || [],
+                      expires_at: exchangeResult.expires_at,
+                      token: exchangeResult.access_token
+                    }
+                  }, '*');
+                  console.log('Tango callback - PostMessage sent with wildcard origin');
+                  
+                  // Close popup after successful message
+                  setTimeout(() => window.close(), 100);
+                }
               } else {
                 console.error('Tango callback - No window.opener found');
               }
@@ -863,10 +886,18 @@ defmodule Tango.Auth do
 
               // Send error to parent window
               if (window.opener) {
-                window.opener.postMessage({
-                  type: 'oauth_error',
-                  error: error.message
-                }, window.opener.origin);
+                try {
+                  const targetOrigin = window.opener.location.origin;
+                  window.opener.postMessage({
+                    type: 'oauth_error',
+                    error: error.message
+                  }, targetOrigin);
+                } catch (originError) {
+                  window.opener.postMessage({
+                    type: 'oauth_error',
+                    error: error.message
+                  }, '*');
+                }
               }
 
               document.getElementById('status').textContent = 'OAuth flow failed: ' + error.message;
@@ -882,9 +913,19 @@ defmodule Tango.Auth do
     """
   end
 
-  @doc """
-  Safely escape JSON for injection into HTML/JavaScript contexts.
-  """
+  # Format error reasons for JSON encoding, handling OAuth2.Response structs
+  defp format_error_reason(%OAuth2.Response{status_code: status, body: body}) do
+    case Jason.decode(body) do
+      {:ok, %{"error_description" => desc}} -> desc
+      {:ok, %{"error" => error}} -> error
+      _ -> "OAuth error (HTTP #{status})"
+    end
+  end
+
+  defp format_error_reason(reason) when is_binary(reason), do: reason
+  defp format_error_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_error_reason(reason), do: inspect(reason)
+
   def html_escape_json(json_string) do
     # Jason.encode! with escape: :html_safe handles XSS prevention automatically
     json_string
