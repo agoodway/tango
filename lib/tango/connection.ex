@@ -461,7 +461,8 @@ defmodule Tango.Connection do
       OAuth2.Client.new(
         client_id: oauth_config.client_id,
         client_secret: oauth_config.client_secret,
-        token_url: oauth_config.token_url
+        token_url: oauth_config.token_url,
+        serializers: %{"application/json" => Jason}
       )
 
     # Prepare refresh parameters

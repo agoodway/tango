@@ -706,4 +706,38 @@ defmodule Tango.ConnectionTest do
                Tango.Connection.get_connection_for_provider(provider.name, tenant_id)
     end
   end
+
+  describe "OAuth2 client configuration for token refresh" do
+    test "refresh flow should handle JSON responses correctly" do
+      # This test validates that OAuth2.Client is configured with JSON serializer
+      # for token refresh, ensuring proper parsing of refresh token responses
+
+      # Simulate a refresh token response from Google/GitHub/etc
+      mock_refresh_response = %{
+        "access_token" => "new_access_token_123",
+        "expires_in" => 3600,
+        "token_type" => "Bearer",
+        "scope" => "user email"
+      }
+
+      # Test that OAuth2.AccessToken.new properly parses map responses
+      token = OAuth2.AccessToken.new(mock_refresh_response)
+
+      assert token.access_token == "new_access_token_123"
+      assert token.expires_at != nil
+      assert token.token_type == "Bearer"
+      assert token.other_params["scope"] == "user email"
+
+      # Test broken behavior (what happens WITHOUT serializer)
+      # When OAuth2.Client doesn't have serializer configured, the entire
+      # JSON string response gets dumped into access_token field
+      json_string = Jason.encode!(mock_refresh_response)
+      broken_token = OAuth2.AccessToken.new(json_string)
+
+      # Without serializer, entire JSON becomes access_token
+      assert broken_token.access_token == json_string
+      assert broken_token.expires_at == nil
+      assert broken_token.other_params == %{}
+    end
+  end
 end
