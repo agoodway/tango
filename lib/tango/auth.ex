@@ -97,11 +97,18 @@ defmodule Tango.Auth do
   end
 
   defp build_auth_url(oauth_config, provider, session, redirect_uri, scopes) do
-    auth_url =
+    auth_params =
       build_base_auth_params(oauth_config, session, redirect_uri, scopes)
       |> maybe_add_pkce_challenge(session)
       |> merge_metadata_auth_params(provider)
-      |> then(&build_authorization_url(oauth_config.auth_url, &1))
+
+    Logger.info(
+      "Tango OAuth building authorization URL: provider=#{provider.slug}, " <>
+        "has_metadata_auth_params=#{inspect(Map.has_key?(provider.metadata, "auth_params"))}, " <>
+        "final_auth_params_keys=#{inspect(Map.keys(auth_params))}"
+    )
+
+    auth_url = build_authorization_url(oauth_config.auth_url, auth_params)
 
     {:ok, auth_url}
   end
@@ -372,10 +379,26 @@ defmodule Tango.Auth do
     with client <- build_oauth_client(oauth_config, opts),
          token_params <- build_token_params(authorization_code, session, validated_redirect_uri),
          _ <- log_token_exchange_params(token_params, session),
-         {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
+         {:ok, %{token: token} = response} <- OAuth2.Client.get_token(client, token_params),
+         _ <-
+           Logger.info(
+             "DEBUG: OAuth2.Client.get_token raw response: #{inspect(response)}"
+           ),
+         _ <-
+           Logger.info(
+             "Tango OAuth raw token from OAuth2 library: access_token_present=#{is_binary(token.access_token)}, " <>
+               "refresh_token=#{inspect(token.refresh_token)}, " <>
+               "expires_at=#{inspect(token.expires_at)}, " <>
+               "other_params=#{inspect(token.other_params)}"
+           ),
          :ok <- validate_access_token(token.access_token) do
-      Logger.info("Tango OAuth token exchange successful")
-      {:ok, convert_token_to_response(token)}
+      token_response = convert_token_to_response(token)
+
+      Logger.info(
+        "Tango OAuth token exchange successful, converted response: #{inspect(Map.drop(token_response, ["access_token"]))}"
+      )
+
+      {:ok, token_response}
     else
       {:error, %OAuth2.Error{reason: reason}} ->
         Logger.error("Tango OAuth2 error: #{inspect(reason)}")
@@ -464,13 +487,23 @@ defmodule Tango.Auth do
     # Extract the actual access token from JSON if needed
     access_token = extract_access_token(token.access_token)
 
-    %{
+    result = %{
       "access_token" => access_token,
       "refresh_token" => token.refresh_token,
       "token_type" => token.token_type,
       "expires_in" => calculate_expires_in_seconds(token.expires_at),
       "scope" => token.other_params["scope"]
     }
+
+    Logger.info(
+      "DEBUG: convert_token_to_response - Input token: refresh_token=#{inspect(token.refresh_token)}, expires_at=#{inspect(token.expires_at)}, other_params=#{inspect(token.other_params)}"
+    )
+
+    Logger.info(
+      "DEBUG: convert_token_to_response - Output: #{inspect(Map.drop(result, ["access_token"]))}"
+    )
+
+    result
   end
 
   # Extract actual access token from potentially JSON-encoded response
