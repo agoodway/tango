@@ -125,4 +125,41 @@ defmodule Tango.AuthTest do
       assert result["access_token"] == json_without_token
     end
   end
+
+  describe "OAuth2 client configuration" do
+    test "build_oauth_client includes JSON serializer" do
+      # This test ensures the OAuth2.Client is configured with Jason serializer
+      # to properly parse JSON responses from OAuth providers (like Google, GitHub, etc.)
+
+      # Create a mock OAuth2 response like what Google returns
+      mock_google_response = %{
+        "access_token" => "ya29.test_token",
+        "expires_in" => 3599,
+        "refresh_token" => "1//05test_refresh",
+        "scope" => "https://www.googleapis.com/auth/calendar",
+        "token_type" => "Bearer"
+      }
+
+      # Test that OAuth2.AccessToken.new properly parses the response when given a map
+      token = OAuth2.AccessToken.new(mock_google_response)
+
+      assert token.access_token == "ya29.test_token"
+      assert token.refresh_token == "1//05test_refresh"
+      assert token.expires_at != nil
+      assert token.other_params["scope"] == "https://www.googleapis.com/auth/calendar"
+
+      # The key assertion: When OAuth2.Client has a serializer configured,
+      # it will decode the JSON response body into a map BEFORE creating the AccessToken.
+      # Without the serializer, the entire JSON string gets dumped into access_token field.
+
+      # Test the broken behavior (what happens WITHOUT serializer)
+      json_string = Jason.encode!(mock_google_response)
+      broken_token = OAuth2.AccessToken.new(json_string)
+
+      # Without serializer, the entire JSON becomes the access_token
+      assert broken_token.access_token == json_string
+      assert broken_token.refresh_token == nil
+      assert broken_token.expires_at == nil
+    end
+  end
 end

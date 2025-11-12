@@ -381,9 +381,7 @@ defmodule Tango.Auth do
          _ <- log_token_exchange_params(token_params, session),
          {:ok, %{token: token} = response} <- OAuth2.Client.get_token(client, token_params),
          _ <-
-           Logger.info(
-             "DEBUG: OAuth2.Client.get_token raw response: #{inspect(response)}"
-           ),
+           Logger.info("DEBUG: OAuth2.Client.get_token raw response: #{inspect(response)}"),
          _ <-
            Logger.info(
              "Tango OAuth raw token from OAuth2 library: access_token_present=#{is_binary(token.access_token)}, " <>
@@ -415,7 +413,8 @@ defmodule Tango.Auth do
       client_id: oauth_config.client_id,
       client_secret: oauth_config.client_secret,
       token_url: oauth_config.token_url,
-      redirect_uri: Keyword.get(opts, :redirect_uri)
+      redirect_uri: Keyword.get(opts, :redirect_uri),
+      serializers: %{"application/json" => Jason}
     )
   end
 
