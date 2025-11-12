@@ -26,29 +26,23 @@ defmodule Tango.Connection do
 
   """
   def list_connections(tenant_id, opts \\ []) when is_binary(tenant_id) do
-    query = from(c in Connection, where: c.tenant_id == ^tenant_id and c.status == :active)
-
-    query =
-      case Keyword.get(opts, :provider) do
-        nil ->
-          query
-
-        provider_name ->
-          from(c in query,
-            join: p in assoc(c, :provider),
-            where: p.name == ^provider_name
-          )
-      end
-
-    query =
-      if Keyword.get(opts, :preload, true) do
-        from(c in query, preload: [:provider])
-      else
-        query
-      end
-
-    @repo.all(query)
+    Connection
+    |> where([c], c.tenant_id == ^tenant_id and c.status == :active)
+    |> maybe_filter_by_provider(Keyword.get(opts, :provider))
+    |> maybe_preload_associations(Keyword.get(opts, :preload, true))
+    |> @repo.all()
   end
+
+  defp maybe_filter_by_provider(query, nil), do: query
+
+  defp maybe_filter_by_provider(query, provider_name) do
+    query
+    |> join(:inner, [c], p in assoc(c, :provider))
+    |> where([c, p], p.name == ^provider_name)
+  end
+
+  defp maybe_preload_associations(query, false), do: query
+  defp maybe_preload_associations(query, true), do: preload(query, [:provider])
 
   @doc """
   Gets a connection by ID with tenant isolation.
@@ -123,23 +117,26 @@ defmodule Tango.Connection do
   """
   def get_connection_for_provider(provider_slug, tenant_id, opts)
       when is_binary(provider_slug) and is_binary(tenant_id) and is_list(opts) do
-    auto_refresh = Keyword.get(opts, :auto_refresh, false)
-
     with {:ok, connection} <- get_connection_for_provider(provider_slug, tenant_id) do
-      if auto_refresh and Connection.needs_refresh?(connection) and
-           Connection.can_refresh?(connection) do
-        case refresh_connection(connection) do
-          {:ok, refreshed_connection} ->
-            {:ok, refreshed_connection}
-
-          {:error, _refresh_error} ->
-            # Return original connection if refresh fails - let caller handle expired token
-            {:ok, connection}
-        end
-      else
-        {:ok, connection}
-      end
+      maybe_auto_refresh(connection, Keyword.get(opts, :auto_refresh, false))
     end
+  end
+
+  defp maybe_auto_refresh(connection, false), do: {:ok, connection}
+
+  defp maybe_auto_refresh(connection, true) do
+    if should_refresh?(connection) do
+      case refresh_connection(connection) do
+        {:ok, refreshed} -> {:ok, refreshed}
+        {:error, _} -> {:ok, connection}
+      end
+    else
+      {:ok, connection}
+    end
+  end
+
+  defp should_refresh?(%Connection{} = connection) do
+    Connection.needs_refresh?(connection) and Connection.can_refresh?(connection)
   end
 
   @doc """
@@ -435,17 +432,13 @@ defmodule Tango.Connection do
     end
   end
 
+  defp validate_refresh_eligibility(%Connection{refresh_token: nil}),
+    do: {:error, :no_refresh_token}
+
   defp validate_refresh_eligibility(%Connection{} = connection) do
-    cond do
-      not Connection.can_refresh?(connection) ->
-        {:error, :refresh_not_allowed}
-
-      connection.refresh_token == nil ->
-        {:error, :no_refresh_token}
-
-      true ->
-        :ok
-    end
+    if Connection.can_refresh?(connection),
+      do: :ok,
+      else: {:error, :refresh_not_allowed}
   end
 
   defp get_connection_provider(%Connection{provider_id: provider_id}) do
@@ -456,41 +449,35 @@ defmodule Tango.Connection do
   end
 
   defp perform_token_refresh(oauth_config, connection) do
-    # Build OAuth2 client for refresh
-    client =
-      OAuth2.Client.new(
-        client_id: oauth_config.client_id,
-        client_secret: oauth_config.client_secret,
-        token_url: oauth_config.token_url,
-        serializers: %{"application/json" => Jason}
-      )
-
-    # Prepare refresh parameters
-    refresh_params = [
-      refresh_token: connection.refresh_token,
-      grant_type: "refresh_token"
-    ]
-
-    # Perform refresh
-    case OAuth2.Client.refresh_token(client, refresh_params) do
-      {:ok, %{token: %OAuth2.AccessToken{} = new_token}} ->
-        # Convert to our token response format
-        token_response = %{
-          "access_token" => new_token.access_token,
-          "refresh_token" => new_token.refresh_token || connection.refresh_token,
-          "token_type" => new_token.token_type,
-          "expires_in" => calculate_expires_in(new_token.expires_at),
-          "scope" => new_token.other_params["scope"]
-        }
-
-        {:ok, token_response}
-
-      {:error, %OAuth2.Error{reason: reason}} ->
-        {:error, reason}
-
-      {:error, reason} ->
-        {:error, reason}
+    oauth_config
+    |> build_refresh_client(connection.refresh_token)
+    |> OAuth2.Client.get_token()
+    |> case do
+      {:ok, %{token: token}} -> {:ok, convert_token_to_response(token, connection)}
+      {:error, %OAuth2.Error{reason: reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp build_refresh_client(oauth_config, refresh_token) do
+    OAuth2.Client.new(
+      strategy: OAuth2.Strategy.Refresh,
+      client_id: oauth_config.client_id,
+      client_secret: oauth_config.client_secret,
+      token_url: oauth_config.token_url,
+      serializers: %{"application/json" => Jason},
+      params: %{"refresh_token" => refresh_token}
+    )
+  end
+
+  defp convert_token_to_response(%OAuth2.AccessToken{} = token, connection) do
+    %{
+      "access_token" => token.access_token,
+      "refresh_token" => token.refresh_token || connection.refresh_token,
+      "token_type" => token.token_type,
+      "expires_in" => calculate_expires_in(token.expires_at),
+      "scope" => token.other_params["scope"]
+    }
   end
 
   defp update_connection_from_refresh(connection, token_response) do
