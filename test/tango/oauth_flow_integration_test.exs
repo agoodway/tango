@@ -171,6 +171,220 @@ defmodule Tango.OAuthFlowIntegrationTest do
     end
   end
 
+  describe "provider metadata auth_params in authorization URLs" do
+    setup do
+      bypass = Bypass.open()
+
+      # Setup token endpoint with stub
+      Bypass.stub(bypass, "POST", "/oauth/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "mock_access_token_with_refresh",
+            "refresh_token" => "mock_refresh_token",
+            "token_type" => "Bearer",
+            "expires_in" => 3600,
+            "scope" => "https://www.googleapis.com/auth/calendar"
+          })
+        )
+      end)
+
+      %{bypass: bypass}
+    end
+
+    test "includes metadata auth_params in authorization URL for Google OAuth", %{bypass: bypass} do
+      tenant_id = "user-google-metadata"
+
+      # Create Google provider with metadata containing auth_params
+      urls = %{
+        "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+      }
+
+      provider =
+        Factory.create_google_provider("_with_metadata",
+          urls: urls,
+          with_metadata: true
+        )
+
+      # Create session and generate authorization URL
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Verify metadata auth_params are included in URL
+      assert String.contains?(auth_url, "access_type=offline")
+      assert String.contains?(auth_url, "prompt=consent")
+
+      # Verify standard params are still present
+      assert String.contains?(auth_url, "client_id=google_client_id_with_metadata")
+      assert String.contains?(auth_url, "response_type=code")
+      assert String.contains?(auth_url, "scope=")
+    end
+
+    test "metadata auth_params don't override standard OAuth params", %{bypass: bypass} do
+      tenant_id = "user-no-override"
+
+      urls = %{
+        "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+      }
+
+      # Create provider with metadata trying to override client_id (should not work)
+      provider =
+        Factory.create_provider(%{
+          name: "override_test",
+          slug: "override_test",
+          auth_mode: "oauth2",
+          client_secret: "test_secret",
+          config: %{
+            "display_name" => "Override Test",
+            "client_id" => "correct_client_id",
+            "auth_url" => urls["auth_url"],
+            "token_url" => urls["token_url"]
+          },
+          metadata: %{
+            "auth_params" => %{
+              "client_id" => "malicious_client_id",
+              "custom_param" => "custom_value"
+            }
+          }
+        })
+
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Standard params should use original values (Map.merge puts standard params last)
+      assert String.contains?(auth_url, "client_id=correct_client_id")
+      refute String.contains?(auth_url, "client_id=malicious_client_id")
+
+      # Custom param should be included
+      assert String.contains?(auth_url, "custom_param=custom_value")
+    end
+
+    test "handles providers without metadata gracefully", %{bypass: bypass} do
+      tenant_id = "user-no-metadata"
+
+      urls = %{
+        "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+      }
+
+      # Create provider without metadata field
+      provider =
+        Factory.create_provider(%{
+          name: "no_metadata",
+          slug: "no_metadata",
+          auth_mode: "oauth2",
+          client_secret: "test_secret",
+          config: %{
+            "display_name" => "No Metadata",
+            "client_id" => "test_client_id",
+            "auth_url" => urls["auth_url"],
+            "token_url" => urls["token_url"]
+          },
+          metadata: %{}
+        })
+
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Should generate valid URL without errors
+      assert String.contains?(auth_url, "client_id=test_client_id")
+      assert String.contains?(auth_url, "response_type=code")
+    end
+
+    test "handles nil auth_params in metadata", %{bypass: bypass} do
+      tenant_id = "user-nil-auth-params"
+
+      urls = %{
+        "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+      }
+
+      provider =
+        Factory.create_provider(%{
+          name: "nil_auth_params",
+          slug: "nil_auth_params",
+          auth_mode: "oauth2",
+          client_secret: "test_secret",
+          config: %{
+            "display_name" => "Nil Auth Params",
+            "client_id" => "test_client_id",
+            "auth_url" => urls["auth_url"],
+            "token_url" => urls["token_url"]
+          },
+          metadata: %{
+            "auth_params" => nil
+          }
+        })
+
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Should work without errors
+      assert String.contains?(auth_url, "client_id=test_client_id")
+    end
+
+    test "complete OAuth flow with metadata auth_params", %{bypass: bypass} do
+      tenant_id = "user-complete-flow"
+
+      urls = %{
+        "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+      }
+
+      provider =
+        Factory.create_google_provider("_complete_flow",
+          urls: urls,
+          with_metadata: true
+        )
+
+      # Step 1: Create session
+      {:ok, session} = Auth.create_session(provider.slug, tenant_id)
+
+      # Step 2: Generate authorization URL with metadata params
+      {:ok, auth_url} =
+        Auth.authorize_url(session.session_token,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Verify metadata params in URL
+      assert String.contains?(auth_url, "access_type=offline")
+      assert String.contains?(auth_url, "prompt=consent")
+
+      # Step 3: Extract state and complete exchange
+      {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
+
+      {:ok, connection} =
+        Auth.exchange_code(encoded_state, "auth_code_complete", tenant_id,
+          redirect_uri: "https://myapp.com/callback"
+        )
+
+      # Step 4: Verify connection was created successfully
+      assert connection.status == :active
+      assert connection.access_token == "mock_access_token_with_refresh"
+      # Note: refresh_token handling is tested elsewhere
+    end
+  end
+
   describe "OAuth flow error scenarios" do
     setup do
       bypass = Bypass.open()

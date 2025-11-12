@@ -252,19 +252,10 @@ defmodule Tango.NetworkFailureTest do
       # Run batch refresh
       result = Connection.refresh_expiring_connections()
 
-      # Should return result even if some fail
-      case result do
-        {:ok, count} ->
-          assert is_integer(count)
-          assert count >= 0
-
-        {:error, _reason} ->
-          # This is also acceptable - batch operation failed
-          :ok
-
-        other ->
-          flunk("Unexpected result from batch refresh: #{inspect(other)}")
-      end
+      # Should return success count even if some connections fail to refresh
+      assert {:ok, count} = result
+      assert is_integer(count)
+      assert count >= 0
     end
 
     test "handles no expiring connections gracefully" do

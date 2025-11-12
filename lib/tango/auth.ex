@@ -91,40 +91,50 @@ defmodule Tango.Auth do
       # Validate redirect URI for security
       with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
            {:ok, updated_session} <- update_session_redirect_uri(session, redirect_uri) do
-        build_auth_url(oauth_config, updated_session, redirect_uri, scopes)
+        build_auth_url(oauth_config, provider, updated_session, redirect_uri, scopes)
       end
     end
   end
 
-  defp build_auth_url(oauth_config, session, redirect_uri, scopes) do
-    # Build authorization URL with encoded state
-    auth_params = %{
-      client_id: oauth_config.client_id,
-      response_type: "code",
-      redirect_uri: redirect_uri,
-      scope: Enum.join(scopes, " "),
-      state: encode_state_with_tenant(session.state, session.tenant_id)
-    }
+  defp build_auth_url(oauth_config, provider, session, redirect_uri, scopes) do
+    auth_url =
+      build_base_auth_params(oauth_config, session, redirect_uri, scopes)
+      |> maybe_add_pkce_challenge(session)
+      |> merge_metadata_auth_params(provider)
+      |> then(&build_authorization_url(oauth_config.auth_url, &1))
 
-    # Add PKCE challenge if verifier exists
-    auth_params =
-      case session.code_verifier do
-        nil ->
-          auth_params
-
-        _verifier ->
-          challenge = OAuthSession.generate_code_challenge(session)
-
-          Map.merge(auth_params, %{
-            code_challenge: challenge,
-            code_challenge_method: "S256"
-          })
-      end
-
-    # Build final authorization URL
-    auth_url = build_authorization_url(oauth_config.auth_url, auth_params)
     {:ok, auth_url}
   end
+
+  defp build_base_auth_params(oauth_config, session, redirect_uri, scopes) do
+    %{
+      "client_id" => oauth_config.client_id,
+      "response_type" => "code",
+      "redirect_uri" => redirect_uri,
+      "scope" => Enum.join(scopes, " "),
+      "state" => encode_state_with_tenant(session.state, session.tenant_id)
+    }
+  end
+
+  defp maybe_add_pkce_challenge(auth_params, %{code_verifier: nil}), do: auth_params
+
+  defp maybe_add_pkce_challenge(auth_params, session) do
+    challenge = OAuthSession.generate_code_challenge(session)
+
+    Map.merge(auth_params, %{
+      "code_challenge" => challenge,
+      "code_challenge_method" => "S256"
+    })
+  end
+
+  # Merges provider metadata auth_params into authorization parameters.
+  # Metadata params are merged first so standard OAuth params take precedence (security).
+  defp merge_metadata_auth_params(auth_params, %{metadata: %{"auth_params" => params}})
+       when is_map(params) and map_size(params) > 0 do
+    Map.merge(params, auth_params)
+  end
+
+  defp merge_metadata_auth_params(auth_params, _provider), do: auth_params
 
   @doc """
   Exchanges authorization code for access token.

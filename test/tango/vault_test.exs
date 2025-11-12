@@ -107,12 +107,12 @@ defmodule Tango.VaultTest do
 
       # Try different corruption strategies
       corruption_attempts = [
-        # Truncate the data
-        String.slice(encrypted, 0..-10),
+        # Truncate the data (remove last 9 characters)
+        String.slice(encrypted, 0..-11//1),
         # Add extra bytes
         encrypted <> "extra_bytes",
         # Replace middle section
-        String.slice(encrypted, 0..10) <> "corrupted" <> String.slice(encrypted, -10..-1)
+        String.slice(encrypted, 0..10) <> "corrupted" <> String.slice(encrypted, -10..-1//1)
       ]
 
       # At least one corruption should fail

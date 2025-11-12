@@ -86,7 +86,11 @@ defmodule Tango.Schemas.AuditLogTest do
     end
 
     test "preserves provided occurred_at" do
-      specific_time = DateTime.add(DateTime.utc_now(), -3600, :second)
+      # Truncate to :second precision to match Ecto's :utc_datetime casting
+      specific_time =
+        DateTime.utc_now()
+        |> DateTime.add(-3600, :second)
+        |> DateTime.truncate(:second)
 
       attrs = %{
         event_type: :oauth_start,
@@ -97,7 +101,7 @@ defmodule Tango.Schemas.AuditLogTest do
 
       changeset = AuditLog.changeset(%AuditLog{}, attrs)
       assert changeset.valid?
-      # Check the changeset preserves the specific time (should be close)
+      # Check the changeset preserves the specific time
       occurred_at = get_change(changeset, :occurred_at)
       assert DateTime.diff(occurred_at, specific_time) == 0
     end

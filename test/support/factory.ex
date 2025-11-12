@@ -90,6 +90,7 @@ defmodule Tango.Factory do
 
   Options:
   - `:urls` - Map with "auth_url" and "token_url" keys to override default URLs
+  - `:with_metadata` - Boolean to include Google-specific metadata (default: false)
   """
   def create_google_provider(suffix \\ "", opts \\ []) do
     urls =
@@ -97,6 +98,22 @@ defmodule Tango.Factory do
         "auth_url" => "https://accounts.google.com/o/oauth2/auth",
         "token_url" => "https://oauth2.googleapis.com/token"
       })
+
+    with_metadata = Keyword.get(opts, :with_metadata, false)
+
+    metadata =
+      if with_metadata do
+        %{
+          "auth_params" => %{
+            "access_type" => "offline",
+            "prompt" => "consent"
+          },
+          "categories" => ["productivity"],
+          "docs_url" => "https://developers.google.com/identity/protocols/oauth2"
+        }
+      else
+        %{}
+      end
 
     create_provider(%{
       name: "google_test#{suffix}",
@@ -108,7 +125,8 @@ defmodule Tango.Factory do
         "client_id" => "google_client_id#{suffix}",
         "auth_url" => urls["auth_url"],
         "token_url" => urls["token_url"]
-      }
+      },
+      metadata: metadata
     })
   end
 
