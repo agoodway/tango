@@ -164,7 +164,10 @@ defmodule Tango.ValidationTest do
         "code.with.dots",
         "code/with/slashes",
         # Long but reasonable
-        String.duplicate("a", 512)
+        String.duplicate("a", 512),
+        # Some providers use JWT-style codes that can exceed 1KB
+        String.duplicate("a", 2000),
+        String.duplicate("a", 4096)
       ]
 
       Enum.each(valid_codes, fn code ->
@@ -179,8 +182,8 @@ defmodule Tango.ValidationTest do
         "   ",
         "\t",
         "\n",
-        # Too long
-        String.duplicate("a", 2000)
+        # Too long (over 4096 bytes)
+        String.duplicate("a", 5000)
       ]
 
       Enum.each(invalid_codes, fn code ->

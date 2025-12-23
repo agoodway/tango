@@ -468,8 +468,8 @@ defmodule Tango.OAuthFlowIntegrationTest do
         nil,
         # Only whitespace (trims to empty)
         "   ",
-        # Too long
-        String.duplicate("x", 1000)
+        # Too long (over 4096 bytes)
+        String.duplicate("x", 5000)
       ]
 
       for invalid_code <- invalid_codes do

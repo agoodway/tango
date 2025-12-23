@@ -86,7 +86,9 @@ defmodule Tango.Validation do
 
   def validate_authorization_code(code) when is_binary(code) do
     cond do
-      byte_size(code) > 512 -> {:error, :authorization_code_too_long}
+      # OAuth providers use varying code formats and lengths - some use JWT-style
+      # codes that can exceed 1KB. 4KB limit accommodates all known providers.
+      byte_size(code) > 4096 -> {:error, :authorization_code_too_long}
       String.trim(code) == "" -> {:error, :invalid_authorization_code}
       true -> :ok
     end
