@@ -308,14 +308,13 @@ defmodule Tango.ConnectionTest do
         try do
           Tango.Connection.refresh_connection(conn_to_refresh)
         rescue
-          FunctionClauseError -> {:error, :oauth_function_clause}
-          error -> {:error, Exception.message(error)}
+          error in [FunctionClauseError, RuntimeError, MatchError, Protocol.UndefinedError] ->
+            {:error, Exception.message(error)}
         end
 
       # Should fail gracefully due to network/OAuth issues
       assert {:error, _reason} = result
 
-      # Verify the connection still exists and error was handled
       refreshed_conn = Repo.get!(ConnectionSchema, conn_to_refresh.id)
       assert refreshed_conn != nil
     end
@@ -398,9 +397,11 @@ defmodule Tango.ConnectionTest do
         try do
           Tango.Connection.refresh_expiring_connections()
         rescue
-          # No connections refreshed due to OAuth errors
-          FunctionClauseError -> {:ok, 0}
-          error -> {:error, Exception.message(error)}
+          error in [FunctionClauseError, RuntimeError, MatchError, Protocol.UndefinedError] ->
+            case error do
+              %FunctionClauseError{} -> {:ok, 0}
+              _ -> {:error, Exception.message(error)}
+            end
         end
 
       # Should complete without crashing (may have 0 successes due to OAuth failures)

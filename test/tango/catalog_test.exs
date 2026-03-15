@@ -73,7 +73,7 @@ defmodule Tango.CatalogTest do
         assert is_list(config["categories"]),
                "Provider #{provider_name} categories should be list"
 
-        assert length(config["categories"]) > 0,
+        assert match?([_ | _], config["categories"]),
                "Provider #{provider_name} should have at least one category"
 
         # All providers should have auth_mode
@@ -100,7 +100,7 @@ defmodule Tango.CatalogTest do
         |> Enum.filter(fn {_name, config} -> config["auth_mode"] == "OAUTH2" end)
 
       # Should have OAuth2 providers
-      assert length(oauth2_providers) > 0
+      assert match?([_ | _], oauth2_providers)
 
       for {provider_name, config} <- oauth2_providers do
         # OAuth2 providers must have authorization_url
@@ -134,7 +134,7 @@ defmodule Tango.CatalogTest do
         |> Enum.filter(fn {_name, config} -> config["auth_mode"] == "API_KEY" end)
 
       # Should have at least one API key provider (stripe, minimal-provider)
-      assert length(api_key_providers) > 0
+      assert match?([_ | _], api_key_providers)
 
       for {provider_name, config} <- api_key_providers do
         # API key providers typically should not have OAuth fields
@@ -504,7 +504,7 @@ defmodule Tango.CatalogTest do
         |> Enum.filter(fn {_name, config} -> config["auth_mode"] == "OAUTH2" end)
 
       # Should have OAuth2 providers in our mock
-      assert length(oauth_providers) > 0
+      assert match?([_ | _], oauth_providers)
 
       for {provider_name, config} <- oauth_providers do
         if config["authorization_url"] do

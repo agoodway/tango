@@ -27,7 +27,6 @@ defmodule Tango.NetworkFailureTest do
       provider = Factory.create_github_provider("_exchange_timeout", urls: urls)
       tenant_id = Factory.tenant_id("exchange_test")
 
-      # Create a session for code exchange and get encoded state
       {:ok, encoded_state, _session} =
         OAuthFlowHelper.get_encoded_state_for_session(
           provider.name,
@@ -147,9 +146,8 @@ defmodule Tango.NetworkFailureTest do
         try do
           Connection.refresh_connection(connection)
         rescue
-          # Handle potential function clause errors from OAuth2 library
-          FunctionClauseError -> {:error, :oauth_error}
-          error -> {:error, Exception.message(error)}
+          error in [FunctionClauseError, RuntimeError, MatchError, Protocol.UndefinedError] ->
+            {:error, Exception.message(error)}
         end
 
       # Should handle failure gracefully
@@ -331,8 +329,7 @@ defmodule Tango.NetworkFailureTest do
         try do
           Auth.create_session(provider.name, long_tenant_id)
         rescue
-          Postgrex.Error -> {:error, :db_constraint}
-          error -> {:error, Exception.message(error)}
+          _error in [Postgrex.Error] -> {:error, :db_constraint}
         end
 
       # Should handle database constraints gracefully
@@ -397,8 +394,8 @@ defmodule Tango.NetworkFailureTest do
             try do
               Connection.refresh_connection(connection)
             rescue
-              FunctionClauseError -> {:error, :oauth_error}
-              error -> {:error, Exception.message(error)}
+              error in [FunctionClauseError, RuntimeError, MatchError, Protocol.UndefinedError] ->
+                {:error, Exception.message(error)}
             end
           end)
         end

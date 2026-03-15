@@ -7,8 +7,8 @@ defmodule Tango.Connection do
   """
 
   import Ecto.Query, warn: false
-  # Repo will be configured by the host application
-  @repo Application.compile_env(:tango, :repo, Tango.Repo)
+  require Logger
+  defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
 
   alias Tango.Provider
   alias Tango.Schemas.{AuditLog, Connection, Provider}
@@ -30,7 +30,7 @@ defmodule Tango.Connection do
     |> where([c], c.tenant_id == ^tenant_id and c.status == :active)
     |> maybe_filter_by_provider(Keyword.get(opts, :provider))
     |> maybe_preload_associations(Keyword.get(opts, :preload, true))
-    |> @repo.all()
+    |> repo().all()
   end
 
   defp maybe_filter_by_provider(query, nil), do: query
@@ -58,7 +58,7 @@ defmodule Tango.Connection do
   """
   def get_connection(connection_id, tenant_id)
       when is_integer(connection_id) and is_binary(tenant_id) do
-    case @repo.get_by(Connection, id: connection_id, tenant_id: tenant_id) do
+    case repo().get_by(Connection, id: connection_id, tenant_id: tenant_id) do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}
     end
@@ -94,7 +94,7 @@ defmodule Tango.Connection do
         preload: [:provider]
       )
 
-    case @repo.one(query) do
+    case repo().one(query) do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}
     end
@@ -153,7 +153,7 @@ defmodule Tango.Connection do
   def mark_connection_used(%Connection{} = connection) do
     connection
     |> Connection.changeset(%{last_used_at: DateTime.utc_now()})
-    |> @repo.update()
+    |> repo().update()
   end
 
   @doc """
@@ -173,26 +173,41 @@ defmodule Tango.Connection do
   """
   def refresh_connection(%Connection{} = connection) do
     with :ok <- validate_refresh_eligibility(connection),
-         {:ok, provider} <- get_connection_provider(connection),
+         {:ok, provider} <- get_connection_provider_cached(connection),
          {:ok, oauth_config} <- Provider.get_oauth_credentials(provider),
-         {:ok, token_response} <- perform_token_refresh(oauth_config, connection),
-         {:ok, updated_connection} <- update_connection_from_refresh(connection, token_response) do
-      # Log successful refresh
-      AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
-      |> @repo.insert()
-
-      {:ok, updated_connection}
+         {:ok, token_response} <- perform_token_refresh(oauth_config, connection) do
+      try do
+        Ecto.Multi.new()
+        |> Ecto.Multi.update(
+          :connection,
+          Connection.refresh_changeset(connection, token_response)
+        )
+        |> Ecto.Multi.run(:audit_log, fn repo, %{connection: updated_connection} ->
+          AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
+          |> repo.insert()
+        end)
+        |> repo().transaction()
+        |> case do
+          {:ok, %{connection: updated_connection}} -> {:ok, updated_connection}
+          {:error, _op, reason, _changes} -> {:error, reason}
+        end
+      rescue
+        _e in [Ecto.StaleEntryError] -> {:error, :concurrent_refresh}
+      end
     else
       {:error, reason} = error ->
-        # Record refresh failure
-        {:ok, failed_connection} = record_refresh_failure(connection, reason)
-
-        # Log failed refresh
-        AuditLog.log_connection_event(:token_refresh_failed, failed_connection, false, %{
-          reason: reason,
-          attempts: failed_connection.refresh_attempts
-        })
-        |> @repo.insert()
+        Ecto.Multi.new()
+        |> Ecto.Multi.run(:failure, fn _repo, _changes ->
+          record_refresh_failure(connection, reason)
+        end)
+        |> Ecto.Multi.run(:audit_log, fn repo, %{failure: failed_connection} ->
+          AuditLog.log_connection_event(:token_refresh_failed, failed_connection, false, %{
+            reason: reason,
+            attempts: failed_connection.refresh_attempts
+          })
+          |> repo.insert()
+        end)
+        |> repo().transaction()
 
         error
     end
@@ -213,6 +228,8 @@ defmodule Tango.Connection do
     # Find connections that need refresh
     buffer_time = refresh_buffer_time()
 
+    batch_size = Application.get_env(:tango, :refresh_batch_size, 100)
+
     connections =
       from(c in Connection,
         where: c.status == :active,
@@ -221,9 +238,10 @@ defmodule Tango.Connection do
         where: not is_nil(c.refresh_token),
         where: not is_nil(c.expires_at),
         where: c.expires_at <= ^buffer_time,
+        limit: ^batch_size,
         preload: [:provider]
       )
-      |> @repo.all()
+      |> repo().all()
 
     results =
       connections
@@ -240,7 +258,7 @@ defmodule Tango.Connection do
         failure_count: failure_count,
         total_processed: length(connections)
       })
-      |> @repo.insert()
+      |> repo().insert()
     end
 
     {:ok, success_count}
@@ -258,18 +276,16 @@ defmodule Tango.Connection do
 
   """
   def revoke_connection(%Connection{tenant_id: tenant_id} = connection, tenant_id) do
-    changeset = Connection.changeset(connection, %{status: "revoked"})
-
-    case @repo.update(changeset) do
-      {:ok, revoked_connection} ->
-        # Log connection revocation
-        AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
-        |> @repo.insert()
-
-        {:ok, revoked_connection}
-
-      error ->
-        error
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(:connection, Connection.changeset(connection, %{status: "revoked"}))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{connection: revoked_connection} ->
+      AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> case do
+      {:ok, %{connection: revoked_connection}} -> {:ok, revoked_connection}
+      {:error, _op, reason, _changes} -> {:error, reason}
     end
   end
 
@@ -287,22 +303,33 @@ defmodule Tango.Connection do
 
   """
   def revoke_tenant_connections(tenant_id) when is_binary(tenant_id) do
-    {count, _} =
-      from(c in Connection,
-        where: c.tenant_id == ^tenant_id,
-        where: c.status == :active
-      )
-      |> @repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:revoke, fn repo, _changes ->
+      {count, _} =
+        from(c in Connection,
+          where: c.tenant_id == ^tenant_id,
+          where: c.status == :active
+        )
+        |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
-    if count > 0 do
-      AuditLog.log_system_event(:tenant_connections_revoked, true, %{
-        tenant_id: tenant_id,
-        revoked_count: count
-      })
-      |> @repo.insert()
+      {:ok, count}
+    end)
+    |> Ecto.Multi.run(:audit_log, fn repo, %{revoke: count} ->
+      if count > 0 do
+        AuditLog.log_system_event(:tenant_connections_revoked, true, %{
+          tenant_id: tenant_id,
+          revoked_count: count
+        })
+        |> repo.insert()
+      else
+        {:ok, nil}
+      end
+    end)
+    |> repo().transaction()
+    |> case do
+      {:ok, %{revoke: count}} -> {:ok, count}
+      {:error, _op, reason, _changes} -> {:error, reason}
     end
-
-    {:ok, count}
   end
 
   @doc """
@@ -318,22 +345,37 @@ defmodule Tango.Connection do
   """
   def revoke_provider_connections(provider_name) when is_binary(provider_name) do
     with {:ok, provider} <- Tango.Provider.get_provider(provider_name) do
+      do_revoke_provider_connections(provider, provider_name)
+    end
+  end
+
+  defp do_revoke_provider_connections(provider, provider_name) do
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:revoke, fn repo, _changes ->
       {count, _} =
         from(c in Connection,
           where: c.provider_id == ^provider.id,
           where: c.status == :active
         )
-        |> @repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
+        |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
+      {:ok, count}
+    end)
+    |> Ecto.Multi.run(:audit_log, fn repo, %{revoke: count} ->
       if count > 0 do
         AuditLog.log_system_event(:provider_connections_revoked, true, %{
           provider_name: provider_name,
           revoked_count: count
         })
-        |> @repo.insert()
+        |> repo.insert()
+      else
+        {:ok, nil}
       end
-
-      {:ok, count}
+    end)
+    |> repo().transaction()
+    |> case do
+      {:ok, %{revoke: count}} -> {:ok, count}
+      {:error, _op, reason, _changes} -> {:error, reason}
     end
   end
 
@@ -351,22 +393,33 @@ defmodule Tango.Connection do
   def cleanup_expired_connections do
     cleanup_cutoff = cleanup_cutoff_date()
 
-    {count, _} =
-      from(c in Connection,
-        where: c.status == :expired,
-        where: c.updated_at < ^cleanup_cutoff
-      )
-      |> @repo.delete_all()
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:cleanup, fn repo, _changes ->
+      {count, _} =
+        from(c in Connection,
+          where: c.status == :expired,
+          where: c.updated_at < ^cleanup_cutoff
+        )
+        |> repo.delete_all()
 
-    if count > 0 do
-      AuditLog.log_system_event(:expired_connections_cleanup, true, %{
-        cleaned_count: count,
-        cutoff_date: cleanup_cutoff
-      })
-      |> @repo.insert()
+      {:ok, count}
+    end)
+    |> Ecto.Multi.run(:audit_log, fn repo, %{cleanup: count} ->
+      if count > 0 do
+        AuditLog.log_system_event(:expired_connections_cleanup, true, %{
+          cleaned_count: count,
+          cutoff_date: cleanup_cutoff
+        })
+        |> repo.insert()
+      else
+        {:ok, nil}
+      end
+    end)
+    |> repo().transaction()
+    |> case do
+      {:ok, %{cleanup: count}} -> {:ok, count}
+      {:error, _op, reason, _changes} -> {:error, reason}
     end
-
-    {:ok, count}
   end
 
   @doc """
@@ -385,51 +438,33 @@ defmodule Tango.Connection do
 
   """
   def get_connection_stats(tenant_id) when is_binary(tenant_id) do
-    # Use CTEs for better performance - single query instead of two separate ones
-    status_counts_cte =
+    status_counts =
       from(c in Connection,
         where: c.tenant_id == ^tenant_id,
         group_by: c.status,
-        select: %{status: c.status, count: count(c.id)}
+        select: {c.status, count(c.id)}
       )
+      |> repo().all()
+      |> Map.new()
 
-    active_providers_cte =
+    providers =
       from(c in Connection,
         join: p in assoc(c, :provider),
         where: c.tenant_id == ^tenant_id,
         where: c.status == :active,
         distinct: p.name,
-        select: %{name: p.name}
+        select: p.name,
+        order_by: p.name
       )
+      |> repo().all()
 
-    # Main query using both CTEs
-    query =
-      from(c in Connection)
-      |> with_cte("status_counts", as: ^status_counts_cte)
-      |> with_cte("active_providers", as: ^active_providers_cte)
-      |> select([c], %{
-        status_counts: fragment("(SELECT json_object_agg(status, count) FROM status_counts)"),
-        providers: fragment("(SELECT json_agg(name ORDER BY name) FROM active_providers)")
-      })
-      |> limit(1)
-
-    case @repo.one(query) do
-      %{status_counts: status_counts, providers: providers} ->
-        status_counts = status_counts || %{}
-        providers = providers || []
-
-        %{
-          active: Map.get(status_counts, "active", 0),
-          expired: Map.get(status_counts, "expired", 0),
-          revoked: Map.get(status_counts, "revoked", 0),
-          total: Map.values(status_counts) |> Enum.sum(),
-          providers: providers
-        }
-
-      nil ->
-        # Empty result fallback
-        %{active: 0, expired: 0, revoked: 0, total: 0, providers: []}
-    end
+    %{
+      active: Map.get(status_counts, :active, 0),
+      expired: Map.get(status_counts, :expired, 0),
+      revoked: Map.get(status_counts, :revoked, 0),
+      total: status_counts |> Map.values() |> Enum.sum(),
+      providers: providers
+    }
   end
 
   defp validate_refresh_eligibility(%Connection{refresh_token: nil}),
@@ -441,8 +476,11 @@ defmodule Tango.Connection do
       else: {:error, :refresh_not_allowed}
   end
 
-  defp get_connection_provider(%Connection{provider_id: provider_id}) do
-    case @repo.get(Provider, provider_id) do
+  defp get_connection_provider_cached(%Connection{provider: %Provider{} = provider}),
+    do: {:ok, provider}
+
+  defp get_connection_provider_cached(%Connection{provider_id: provider_id}) do
+    case repo().get(Provider, provider_id) do
       nil -> {:error, :provider_not_found}
       provider -> {:ok, provider}
     end
@@ -480,16 +518,10 @@ defmodule Tango.Connection do
     }
   end
 
-  defp update_connection_from_refresh(connection, token_response) do
-    connection
-    |> Connection.refresh_changeset(token_response)
-    |> @repo.update()
-  end
-
   defp record_refresh_failure(connection, reason) do
     connection
     |> Connection.record_refresh_failure(reason)
-    |> @repo.update()
+    |> repo().update()
   end
 
   defp calculate_expires_in(expires_at) do
@@ -503,6 +535,6 @@ defmodule Tango.Connection do
   end
 
   defp refresh_buffer_time do
-    DateTime.add(DateTime.utc_now(), 10 * 60, :second)
+    DateTime.add(DateTime.utc_now(), 5 * 60, :second)
   end
 end

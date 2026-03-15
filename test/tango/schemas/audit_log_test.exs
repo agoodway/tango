@@ -101,7 +101,6 @@ defmodule Tango.Schemas.AuditLogTest do
 
       changeset = AuditLog.changeset(%AuditLog{}, attrs)
       assert changeset.valid?
-      # Check the changeset preserves the specific time
       occurred_at = get_change(changeset, :occurred_at)
       assert DateTime.diff(occurred_at, specific_time) == 0
     end
@@ -163,7 +162,8 @@ defmodule Tango.Schemas.AuditLogTest do
       assert get_change(changeset, :event_type) == :oauth_start
       assert get_change(changeset, :tenant_id) == tenant_id
       assert get_change(changeset, :provider_id) == provider.id
-      assert get_change(changeset, :session_id) == session.session_token
+      assert get_change(changeset, :session_id) != session.session_token
+      assert String.length(get_change(changeset, :session_id)) == 64
       assert get_change(changeset, :ip_address) == "192.168.1.1"
       assert get_change(changeset, :user_agent) == "Mozilla/5.0"
       assert get_change(changeset, :success) == true
@@ -219,7 +219,8 @@ defmodule Tango.Schemas.AuditLogTest do
       assert get_change(changeset, :tenant_id) == session.tenant_id
       assert get_change(changeset, :provider_id) == session.provider_id
       assert get_change(changeset, :connection_id) == connection.id
-      assert get_change(changeset, :session_id) == session.session_token
+      assert get_change(changeset, :session_id) != session.session_token
+      assert String.length(get_change(changeset, :session_id)) == 64
       assert get_change(changeset, :success) == true
       assert get_change(changeset, :error_code) == nil
 

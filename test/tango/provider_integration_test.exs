@@ -17,7 +17,6 @@ defmodule Tango.ProviderIntegrationTest do
     test "complete provider lifecycle creates comprehensive audit trail" do
       initial_audit_count = Repo.aggregate(AuditLog, :count, :id)
 
-      # Step 1: Create provider using factory
       attrs = %{
         name: "lifecycle-test",
         slug: "lifecycle-test",
@@ -46,7 +45,6 @@ defmodule Tango.ProviderIntegrationTest do
       assert creation_audit.provider_id == provider.id
       assert creation_audit.event_type == :provider_created
 
-      # Step 2: Update provider
       updates = %{
         config: %{
           "display_name" => "Updated Provider Name",
@@ -71,7 +69,6 @@ defmodule Tango.ProviderIntegrationTest do
       assert update_audit != nil
       assert update_audit.provider_id == provider.id
 
-      # Step 3: Deactivate provider
       {:ok, deactivated} = Provider.delete_provider(provider)
       assert deactivated.active == false
 
@@ -86,7 +83,6 @@ defmodule Tango.ProviderIntegrationTest do
 
       assert deactivation_audit != nil
 
-      # Step 4: Reactivate provider
       {:ok, reactivated} = Provider.activate_provider(deactivated)
       assert reactivated.active == true
 

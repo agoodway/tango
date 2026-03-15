@@ -114,10 +114,7 @@ defmodule Tango.Catalog do
   end
 
   defp parse_yaml_content(yaml_string) do
-    case YamlElixir.read_from_string(yaml_string) do
-      {:ok, data} -> {:ok, data}
-      {:error, reason} -> {:error, reason}
-    end
+    YamlElixir.read_from_string(yaml_string)
   end
 
   defp process_providers(raw_providers) when is_map(raw_providers) do

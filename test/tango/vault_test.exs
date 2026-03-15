@@ -260,7 +260,6 @@ defmodule Tango.VaultTest do
       plaintext = "authenticated_encryption_test"
       encrypted = Vault.encrypt(plaintext)
 
-      # AES-GCM should include authentication tag
       # Encrypted data should be longer than plaintext + IV
       # plaintext + IV + auth tag
       assert byte_size(encrypted) > byte_size(plaintext) + 12 + 16
@@ -274,7 +273,6 @@ defmodule Tango.VaultTest do
 
   describe "integration with Cloak vault behavior" do
     test "vault is properly initialized" do
-      # Verify the vault process is running
       assert Process.whereis(Vault) != nil
 
       # Test that the vault can perform basic operations (indicating proper init)

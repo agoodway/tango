@@ -234,8 +234,7 @@ defmodule Tango.API.Router do
   defp validate_api_key(api_key) do
     configured_key = Application.get_env(:tango, :api_key)
 
-    # Check if provided API key matches configured key
-    api_key == configured_key
+    is_binary(configured_key) and Plug.Crypto.secure_compare(api_key, configured_key)
   end
 
   defp extract_tenant_id(conn) do

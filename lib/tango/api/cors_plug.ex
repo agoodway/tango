@@ -34,8 +34,10 @@ defmodule Tango.API.CORSPlug do
 
   import Plug.Conn
 
+  @doc "Initializes the plug options."
   def init(opts), do: opts
 
+  @doc "Handles CORS headers and preflight requests."
   def call(conn, _opts) do
     conn
     |> put_cors_headers()

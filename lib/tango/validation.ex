@@ -365,8 +365,6 @@ defmodule Tango.Validation do
         |> Keyword.take([:redirect_uri, :scopes, :metadata])
 
       {:ok, validated_opts}
-    else
-      error -> error
     end
   end
 

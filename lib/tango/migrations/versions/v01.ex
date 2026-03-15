@@ -1,4 +1,4 @@
-defmodule Tango.Migrations.Versions.V01 do
+defmodule Tango.Migrations.V01 do
   @moduledoc """
   Tango V01 Migration - Initial schema setup.
 
@@ -9,13 +9,8 @@ defmodule Tango.Migrations.Versions.V01 do
   - tango_audit_logs
   """
 
-  alias Tango.Migrations.SqlRunner
-
-  def up(opts \\ []) do
-    SqlRunner.execute_sql_file("01", :up, opts)
-  end
-
-  def down(opts \\ []) do
-    SqlRunner.execute_sql_file("01", :down, opts)
-  end
+  use EctoEvolver.Version,
+    otp_app: :tango,
+    version: "01",
+    sql_path: "repo/sql/versions"
 end

@@ -15,9 +15,9 @@ defmodule Tango.IntegrationTest do
 
   alias Tango.Auth
   alias Tango.Provider
+  alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
   alias Tango.TestRepo, as: Repo
   alias Tango.Types.EncryptedBinary
-  alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
   alias Test.Support.OAuthFlowHelper
 
   describe "complete OAuth flow integration" do
@@ -201,7 +201,8 @@ defmodule Tango.IntegrationTest do
       assert get_change(oauth_start_log, :event_type) == :oauth_start
       assert get_change(oauth_start_log, :tenant_id) == tenant_id
       assert get_change(oauth_start_log, :provider_id) == provider.id
-      assert get_change(oauth_start_log, :session_id) == session.session_token
+      assert get_change(oauth_start_log, :session_id) != session.session_token
+      assert String.length(get_change(oauth_start_log, :session_id)) == 64
       assert get_change(oauth_start_log, :success) == true
 
       event_data = get_change(oauth_start_log, :event_data)
@@ -313,7 +314,6 @@ defmodule Tango.IntegrationTest do
       # Base64url without padding
       assert byte_size(code_challenge) == 43
 
-      # Verify the challenge is consistent
       challenge2 = OAuthSession.generate_code_challenge(session1)
       assert code_challenge == challenge2
     end

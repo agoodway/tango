@@ -18,7 +18,6 @@ defmodule Tango.API.RouterTest do
     # Configure API for testing
     Application.put_env(:tango, :api, cors_origins: ["http://localhost:3000"])
 
-    # Create a test provider
     provider = Factory.create_github_provider()
 
     {:ok, provider: provider}

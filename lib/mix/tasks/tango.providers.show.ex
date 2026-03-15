@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
 
   @shortdoc "Shows detailed provider configuration"
 
+  @doc "Runs the mix task."
   def run([provider_name | _]) when is_binary(provider_name) do
     TaskHelper.ensure_http_started()
     Shell.info("📡 Fetching provider details for '#{provider_name}'...")
@@ -41,6 +42,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
     end
   end
 
+  @doc false
   def run(_args) do
     Shell.error("Provider name required")
     Shell.info("Usage: mix tango.providers.show PROVIDER_NAME")
@@ -69,7 +71,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
   defp suggest_similar_providers(_catalog, provider_name) do
     suggestions = Tango.Catalog.suggest_similar(provider_name)
 
-    if length(suggestions) > 0 do
+    if suggestions != [] do
       Shell.info("")
       Shell.info("Did you mean one of these?")
 
@@ -88,7 +90,7 @@ defmodule Mix.Tasks.Tango.Providers.Show do
     display_default_scopes(config["default_scopes"])
   end
 
-  defp display_default_scopes(scopes) when is_list(scopes) and length(scopes) > 0 do
+  defp display_default_scopes(scopes) when is_list(scopes) and scopes != [] do
     Shell.info("Default Scopes:")
 
     Enum.each(scopes, fn scope ->

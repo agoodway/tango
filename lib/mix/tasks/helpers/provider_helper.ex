@@ -29,12 +29,12 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
         {:ok, config}
 
       {:error, :not_found} ->
-        Shell.error("❌ Provider '#{provider_name}' not found in catalog")
+        Shell.error("Error: Provider '#{provider_name}' not found in catalog")
         suggest_similar_providers(provider_name)
         {:error, :not_found}
 
       {:error, reason} ->
-        Shell.error("❌ Failed to fetch catalog: #{inspect(reason)}")
+        Shell.error("Error: Failed to fetch catalog: #{inspect(reason)}")
         {:error, reason}
     end
   end
@@ -119,7 +119,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
 
     # If user provided scopes, use those instead of catalog defaults
     # Otherwise use catalog defaults
-    if length(user_scopes) > 0 do
+    if user_scopes != [] do
       user_scopes
     else
       catalog_scopes
@@ -139,7 +139,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
         {:ok, provider}
 
       {:error, changeset} ->
-        Shell.error("❌ Failed to create provider:")
+        Shell.error("Error: Failed to create provider:")
         print_changeset_errors(changeset)
         {:error, changeset}
     end
@@ -157,7 +157,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
         {:ok, provider}
 
       {:error, changeset} ->
-        Shell.error("❌ Failed to create provider:")
+        Shell.error("Error: Failed to create provider:")
         print_changeset_errors(changeset)
         {:error, changeset}
     end
@@ -188,7 +188,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
         {:ok, provider}
 
       {:error, changeset} ->
-        Shell.error("❌ Failed to create simple provider:")
+        Shell.error("Error: Failed to create simple provider:")
         print_changeset_errors(changeset)
         {:error, changeset}
     end
@@ -200,7 +200,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   Shows provider details including optional default scopes for OAuth2 providers.
   """
   def display_provider_success(provider, auth_type) do
-    Shell.info("✅ Created #{provider.name} provider")
+    Shell.info("OK: Created #{provider.name} provider")
     Shell.info("   Display Name: #{provider.name}")
     Shell.info("   Status: #{if provider.active, do: "Active", else: "Inactive"}")
     Shell.info("   Auth Mode: #{auth_type}")
@@ -209,7 +209,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   end
 
   defp display_provider_scopes(provider)
-       when is_list(provider.default_scopes) and length(provider.default_scopes) > 0 do
+       when is_list(provider.default_scopes) and provider.default_scopes != [] do
     Shell.info("   Default Scopes: #{Enum.join(provider.default_scopes, ", ")}")
   end
 
@@ -219,7 +219,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   Displays provider creation error with formatted changeset errors.
   """
   def display_creation_error(changeset) do
-    Shell.error("❌ Failed to create provider:")
+    Shell.error("Error: Failed to create provider:")
     print_changeset_errors(changeset)
   end
 

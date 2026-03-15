@@ -9,6 +9,25 @@ defmodule Tango.Schemas.AuditLog do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{
+          id: integer() | nil,
+          event_type: atom() | nil,
+          tenant_id: String.t() | nil,
+          provider_id: integer() | nil,
+          provider: Tango.Schemas.Provider.t() | Ecto.Association.NotLoaded.t() | nil,
+          connection_id: integer() | nil,
+          connection: Tango.Schemas.Connection.t() | Ecto.Association.NotLoaded.t() | nil,
+          session_id: String.t() | nil,
+          success: boolean() | nil,
+          error_code: atom() | nil,
+          ip_address: String.t() | nil,
+          user_agent: String.t() | nil,
+          event_data: map(),
+          sensitive_data_hash: String.t() | nil,
+          occurred_at: DateTime.t() | nil,
+          inserted_at: NaiveDateTime.t() | nil
+        }
+
   @primary_key {:id, :id, autogenerate: true}
   @foreign_key_type :id
   @schema_prefix Application.compile_env(:tango, :schema_prefix, nil)
@@ -121,7 +140,7 @@ defmodule Tango.Schemas.AuditLog do
       event_type: :oauth_start,
       tenant_id: tenant_id,
       provider_id: provider.id,
-      session_id: session.session_token,
+      session_id: hash_sensitive_data(session.session_token),
       ip_address: opts[:ip_address],
       user_agent: opts[:user_agent],
       success: true,
@@ -145,7 +164,7 @@ defmodule Tango.Schemas.AuditLog do
       tenant_id: session.tenant_id,
       provider_id: session.provider_id,
       connection_id: connection && connection.id,
-      session_id: session.session_token,
+      session_id: hash_sensitive_data(session.session_token),
       success: success,
       error_code: error,
       occurred_at: DateTime.utc_now(),

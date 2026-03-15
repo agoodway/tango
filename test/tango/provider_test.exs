@@ -77,7 +77,7 @@ defmodule Tango.ProviderTest do
 
       # Should have both active and inactive
       assert length(active_providers) >= 2
-      assert length(inactive_providers) >= 1
+      assert match?([_ | _], inactive_providers)
 
       # Active names should be sorted
       active_names = Enum.map(active_providers, & &1.name)

@@ -9,6 +9,31 @@ defmodule Tango.Schemas.Connection do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{
+          id: integer() | nil,
+          provider_id: integer() | nil,
+          provider: Tango.Schemas.Provider.t() | Ecto.Association.NotLoaded.t() | nil,
+          tenant_id: String.t() | nil,
+          access_token: binary() | nil,
+          refresh_token: binary() | nil,
+          token_type: :bearer | :token | nil,
+          expires_at: DateTime.t() | nil,
+          granted_scopes: [String.t()] | nil,
+          raw_payload: map(),
+          metadata: map(),
+          status: :active | :revoked | :expired,
+          last_used_at: DateTime.t() | nil,
+          refresh_attempts: non_neg_integer(),
+          last_refresh_failure: String.t() | nil,
+          next_refresh_at: DateTime.t() | nil,
+          refresh_exhausted: boolean(),
+          auto_refresh_enabled: boolean(),
+          connection_config: map(),
+          lock_version: integer(),
+          inserted_at: NaiveDateTime.t() | nil,
+          updated_at: NaiveDateTime.t() | nil
+        }
+
   @primary_key {:id, :id, autogenerate: true}
   @foreign_key_type :id
   @schema_prefix Application.compile_env(:tango, :schema_prefix, nil)
@@ -30,7 +55,8 @@ defmodule Tango.Schemas.Connection do
     :next_refresh_at,
     :refresh_exhausted,
     :auto_refresh_enabled,
-    :connection_config
+    :connection_config,
+    :lock_version
   ]
 
   @required_fields [:provider_id, :tenant_id, :access_token, :status]
@@ -60,6 +86,9 @@ defmodule Tango.Schemas.Connection do
     # Connection configuration overrides
     field(:connection_config, :map, default: %{})
 
+    # Optimistic locking for concurrent refresh protection
+    field(:lock_version, :integer, default: 1)
+
     timestamps()
   end
 
@@ -70,6 +99,7 @@ defmodule Tango.Schemas.Connection do
     |> validate_required(@required_fields)
     |> validate_number(:refresh_attempts, greater_than_or_equal_to: 0)
     |> foreign_key_constraint(:provider_id)
+    |> optimistic_lock(:lock_version)
     |> prepare_changes(&normalize_token_type/1)
   end
 

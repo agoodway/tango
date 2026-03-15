@@ -9,6 +9,21 @@ defmodule Tango.Schemas.Provider do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{
+          id: integer() | nil,
+          slug: String.t() | nil,
+          name: String.t() | nil,
+          config: map(),
+          client_secret: binary() | nil,
+          default_scopes: [String.t()],
+          active: boolean(),
+          metadata: map(),
+          connections: [Tango.Schemas.Connection.t()] | Ecto.Association.NotLoaded.t(),
+          oauth_sessions: [Tango.Schemas.OAuthSession.t()] | Ecto.Association.NotLoaded.t(),
+          inserted_at: NaiveDateTime.t() | nil,
+          updated_at: NaiveDateTime.t() | nil
+        }
+
   @primary_key {:id, :id, autogenerate: true}
   @foreign_key_type :id
   @schema_prefix Application.compile_env(:tango, :schema_prefix, nil)
@@ -89,26 +104,29 @@ defmodule Tango.Schemas.Provider do
 
   defp validate_config(changeset) do
     case get_field(changeset, :config) do
-      config when is_map(config) ->
-        case config do
-          %{"client_id" => _, "auth_url" => _, "token_url" => _} ->
-            changeset
-
-          _ ->
-            add_error(
-              changeset,
-              :config,
-              "must contain client_id, auth_url, and token_url"
-            )
-        end
-
-      nil ->
-        # Config can be nil, will default to empty map
-        changeset
-
-      _ ->
-        add_error(changeset, :config, "must be a map")
+      config when is_map(config) -> validate_config_map(changeset, config)
+      nil -> changeset
+      _ -> add_error(changeset, :config, "must be a map")
     end
+  end
+
+  defp validate_config_map(changeset, %{
+         "client_id" => id,
+         "auth_url" => auth,
+         "token_url" => token
+       })
+       when is_binary(id) and is_binary(auth) and is_binary(token),
+       do: changeset
+
+  defp validate_config_map(changeset, %{"auth_mode" => mode}) when mode != "OAUTH2",
+    do: changeset
+
+  defp validate_config_map(changeset, %{"client_id" => _, "auth_url" => _, "token_url" => _}) do
+    add_error(changeset, :config, "client_id, auth_url, and token_url must be non-nil strings")
+  end
+
+  defp validate_config_map(changeset, _config) do
+    add_error(changeset, :config, "must contain client_id, auth_url, and token_url")
   end
 
   defp build_provider_config(nango_config, opts) do

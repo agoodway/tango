@@ -7,8 +7,7 @@ defmodule Tango.Provider do
   """
 
   import Ecto.Query, warn: false
-  # Repo will be configured by the host application
-  @repo Application.compile_env(:tango, :repo, Tango.Repo)
+  defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
   alias Tango.Schemas.{AuditLog, Provider}
   alias Tango.Schemas.Provider, as: ProviderSchema
 
@@ -25,7 +24,7 @@ defmodule Tango.Provider do
     Provider
     |> where([p], p.active == true)
     |> order_by([p], p.name)
-    |> @repo.all()
+    |> repo().all()
   end
 
   @doc """
@@ -40,7 +39,7 @@ defmodule Tango.Provider do
   def list_all_providers do
     Provider
     |> order_by([p], [p.active, p.name])
-    |> @repo.all()
+    |> repo().all()
   end
 
   @doc """
@@ -58,7 +57,7 @@ defmodule Tango.Provider do
 
   """
   def get_provider(slug) when is_binary(slug) do
-    case @repo.get_by(Provider, slug: slug, active: true) do
+    case repo().get_by(Provider, slug: slug, active: true) do
       nil -> {:error, :not_found}
       provider -> {:ok, provider}
     end
@@ -70,7 +69,7 @@ defmodule Tango.Provider do
   Returns `{:ok, provider}` if found, `{:error, :not_found}` if not found.
   """
   def get_provider_by_id(id) do
-    case @repo.get(Provider, id) do
+    case repo().get(Provider, id) do
       nil -> {:error, :not_found}
       provider -> {:ok, provider}
     end
@@ -89,22 +88,14 @@ defmodule Tango.Provider do
 
   """
   def create_provider(attrs \\ %{}) do
-    result =
-      %Provider{}
-      |> Provider.changeset(attrs)
-      |> @repo.insert()
-
-    case result do
-      {:ok, provider} ->
-        # Log provider creation
-        AuditLog.log_provider_event(:provider_created, provider, true)
-        |> @repo.insert()
-
-        {:ok, provider}
-
-      error ->
-        error
-    end
+    Ecto.Multi.new()
+    |> Ecto.Multi.insert(:provider, Provider.changeset(%Provider{}, attrs))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{provider: provider} ->
+      AuditLog.log_provider_event(:provider_created, provider, true)
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> unwrap_provider_transaction()
   end
 
   @doc """
@@ -117,22 +108,17 @@ defmodule Tango.Provider do
 
   """
   def create_provider_from_nango(name, nango_config, opts \\ []) do
-    changeset = Provider.from_nango_config(name, nango_config, opts)
-
-    case @repo.insert(changeset) do
-      {:ok, provider} ->
-        # Log provider creation
-        AuditLog.log_provider_event(:provider_created, provider, true, %{
-          source: "nango_catalog",
-          nango_provider: name
-        })
-        |> @repo.insert()
-
-        {:ok, provider}
-
-      error ->
-        error
-    end
+    Ecto.Multi.new()
+    |> Ecto.Multi.insert(:provider, Provider.from_nango_config(name, nango_config, opts))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{provider: provider} ->
+      AuditLog.log_provider_event(:provider_created, provider, true, %{
+        source: "nango_catalog",
+        nango_provider: name
+      })
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> unwrap_provider_transaction()
   end
 
   @doc """
@@ -148,26 +134,20 @@ defmodule Tango.Provider do
 
   """
   def update_provider(%Provider{config: old_config} = provider, attrs) do
-    result =
-      provider
-      |> Provider.changeset(attrs)
-      |> @repo.update()
-
-    case result do
-      {:ok, updated_provider} ->
-        # Log provider update if config changed
-        if updated_provider.config != old_config do
-          AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
-            config_changed: true
-          })
-          |> @repo.insert()
-        end
-
-        {:ok, updated_provider}
-
-      error ->
-        error
-    end
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(:provider, Provider.changeset(provider, attrs))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{provider: updated_provider} ->
+      if updated_provider.config != old_config do
+        AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
+          config_changed: true
+        })
+        |> repo.insert()
+      else
+        {:ok, nil}
+      end
+    end)
+    |> repo().transaction()
+    |> unwrap_provider_transaction()
   end
 
   @doc """
@@ -183,22 +163,14 @@ defmodule Tango.Provider do
 
   """
   def delete_provider(%Provider{} = provider) do
-    result =
-      provider
-      |> Provider.changeset(%{active: false})
-      |> @repo.update()
-
-    case result do
-      {:ok, updated_provider} ->
-        # Log provider deletion
-        AuditLog.log_provider_event(:provider_deleted, updated_provider, true)
-        |> @repo.insert()
-
-        {:ok, updated_provider}
-
-      error ->
-        error
-    end
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(:provider, Provider.changeset(provider, %{active: false}))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{provider: updated_provider} ->
+      AuditLog.log_provider_event(:provider_deleted, updated_provider, true)
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> unwrap_provider_transaction()
   end
 
   @doc """
@@ -211,24 +183,16 @@ defmodule Tango.Provider do
 
   """
   def activate_provider(%Provider{} = provider) do
-    result =
-      provider
-      |> Provider.changeset(%{active: true})
-      |> @repo.update()
-
-    case result do
-      {:ok, updated_provider} ->
-        # Log provider activation
-        AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
-          action: "activated"
-        })
-        |> @repo.insert()
-
-        {:ok, updated_provider}
-
-      error ->
-        error
-    end
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(:provider, Provider.changeset(provider, %{active: true}))
+    |> Ecto.Multi.run(:audit_log, fn repo, %{provider: updated_provider} ->
+      AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{
+        action: "activated"
+      })
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> unwrap_provider_transaction()
   end
 
   @doc """
@@ -299,7 +263,7 @@ defmodule Tango.Provider do
   def count_providers do
     Provider
     |> where([p], p.active == true)
-    |> @repo.aggregate(:count, :id)
+    |> repo().aggregate(:count, :id)
   end
 
   @doc """
@@ -317,7 +281,7 @@ defmodule Tango.Provider do
       where: fragment("?->>'auth_mode' = ?", p.config, ^auth_mode),
       order_by: p.name
     )
-    |> @repo.all()
+    |> repo().all()
   end
 
   @doc """
@@ -330,13 +294,27 @@ defmodule Tango.Provider do
 
   """
   def search_providers(search_term) when is_binary(search_term) do
-    search_pattern = "%#{search_term}%"
+    search_pattern = "%#{escape_like(search_term)}%"
 
     from(p in Provider,
       where: p.active == true,
-      where: ilike(p.name, ^search_pattern) or ilike(p.display_name, ^search_pattern),
+      where: ilike(p.name, ^search_pattern) or ilike(p.slug, ^search_pattern),
       order_by: p.name
     )
-    |> @repo.all()
+    |> repo().all()
+  end
+
+  defp unwrap_provider_transaction({:ok, %{provider: provider}}), do: {:ok, provider}
+
+  defp unwrap_provider_transaction({:error, :provider, changeset, _changes}),
+    do: {:error, changeset}
+
+  defp unwrap_provider_transaction({:error, _op, reason, _changes}), do: {:error, reason}
+
+  defp escape_like(term) do
+    term
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
   end
 end

@@ -6,8 +6,8 @@ defmodule Tango.Factory do
   consistent test data patterns.
   """
 
-  alias Tango.TestRepo, as: Repo
   alias Tango.Schemas.{AuditLog, Connection, OAuthSession, Provider}
+  alias Tango.TestRepo, as: Repo
 
   @doc """
   Creates a test provider with optional attributes override.

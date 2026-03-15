@@ -9,6 +9,22 @@ defmodule Tango.Schemas.OAuthSession do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{
+          id: integer() | nil,
+          provider_id: integer() | nil,
+          provider: Tango.Schemas.Provider.t() | Ecto.Association.NotLoaded.t() | nil,
+          tenant_id: String.t() | nil,
+          session_token: String.t() | nil,
+          state: String.t() | nil,
+          code_verifier: String.t() | nil,
+          redirect_uri: String.t() | nil,
+          scopes: [String.t()],
+          expires_at: DateTime.t() | nil,
+          metadata: map(),
+          inserted_at: NaiveDateTime.t() | nil,
+          updated_at: NaiveDateTime.t() | nil
+        }
+
   @primary_key {:id, :id, autogenerate: true}
   @foreign_key_type :id
   @schema_prefix Application.compile_env(:tango, :schema_prefix, nil)

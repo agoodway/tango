@@ -43,6 +43,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
     f: :force
   ]
 
+  @doc "Runs the mix task."
   def run(args) do
     {opts, _args, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 
@@ -125,22 +126,13 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
   end
 
   defp display_changes(changes) do
-    if length(changes.new_providers) > 0 do
+    if changes.new_providers != [] do
       Shell.info("New providers available:")
-
-      Enum.each(changes.new_providers, fn {name, config} ->
-        categories = config["categories"] || []
-
-        category_text =
-          if length(categories) > 0, do: " (#{Enum.join(categories, ", ")})", else: ""
-
-        Shell.info("✅ #{name}#{category_text}")
-      end)
-
+      Enum.each(changes.new_providers, &display_new_provider/1)
       Shell.info("")
     end
 
-    if length(changes.updated_providers) > 0 do
+    if changes.updated_providers != [] do
       Shell.info("Providers to update:")
 
       Enum.each(changes.updated_providers, fn {name, _config, _local} ->
@@ -150,10 +142,16 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
       Shell.info("")
     end
 
-    if length(changes.preserved_providers) > 0 do
+    if changes.preserved_providers != [] do
       Shell.info("Local providers preserved: #{length(changes.preserved_providers)}")
       Shell.info("")
     end
+  end
+
+  defp display_new_provider({name, config}) do
+    categories = config["categories"] || []
+    category_text = if categories != [], do: " (#{Enum.join(categories, ", ")})", else: ""
+    Shell.info("OK: #{name}#{category_text}")
   end
 
   defp apply_changes(changes, opts) do
@@ -167,51 +165,45 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
     )
   end
 
+  defp apply_new_providers([]), do: 0
+
   defp apply_new_providers(new_providers) do
-    if length(new_providers) > 0 do
-      Shell.info("Syncing #{length(new_providers)} new providers...")
+    Shell.info("Syncing #{length(new_providers)} new providers...")
+    new_providers |> Enum.map(&create_new_provider/1) |> Enum.sum()
+  end
 
-      new_providers
-      |> Enum.map(fn {name, config} ->
-        case Tango.Provider.create_provider_from_nango(name, config) do
-          {:ok, _provider} ->
-            Shell.info("✅ Created #{name} provider template")
-            1
+  defp create_new_provider({name, config}) do
+    case Tango.Provider.create_provider_from_nango(name, config) do
+      {:ok, _provider} ->
+        Shell.info("OK: Created #{name} provider template")
+        1
 
-          {:error, changeset} ->
-            Shell.error("❌ Failed to create #{name}:")
-            ProviderHelper.print_changeset_errors(changeset)
-            0
-        end
-      end)
-      |> Enum.sum()
-    else
-      0
+      {:error, changeset} ->
+        Shell.error("Error: Failed to create #{name}:")
+        ProviderHelper.print_changeset_errors(changeset)
+        0
     end
   end
 
+  defp apply_updates([], _opts), do: 0
+
   defp apply_updates(updated_providers, opts) do
-    if length(updated_providers) > 0 do
-      Shell.info("Updating #{length(updated_providers)} existing providers...")
+    Shell.info("Updating #{length(updated_providers)} existing providers...")
+    updated_providers |> Enum.map(&update_single_provider(&1, opts)) |> Enum.sum()
+  end
 
-      updated_providers
-      |> Enum.map(fn {name, config, local_provider} ->
-        update_attrs = build_update_attrs(config, local_provider, opts)
+  defp update_single_provider({name, config, local_provider}, opts) do
+    update_attrs = build_update_attrs(config, local_provider, opts)
 
-        case Tango.Provider.update_provider(local_provider, update_attrs) do
-          {:ok, _provider} ->
-            Shell.info("🔄 Updated #{name}")
-            1
+    case Tango.Provider.update_provider(local_provider, update_attrs) do
+      {:ok, _provider} ->
+        Shell.info("🔄 Updated #{name}")
+        1
 
-          {:error, changeset} ->
-            Shell.error("❌ Failed to update #{name}:")
-            ProviderHelper.print_changeset_errors(changeset)
-            0
-        end
-      end)
-      |> Enum.sum()
-    else
-      0
+      {:error, changeset} ->
+        Shell.error("Error: Failed to update #{name}:")
+        ProviderHelper.print_changeset_errors(changeset)
+        0
     end
   end
 

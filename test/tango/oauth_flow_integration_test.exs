@@ -41,7 +41,6 @@ defmodule Tango.OAuthFlowIntegrationTest do
       tenant_id = "user-12345"
       redirect_uri = "https://myapp.com/oauth/callback"
 
-      # Step 1: Create OAuth session
       {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
       assert session.tenant_id == tenant_id
@@ -51,7 +50,6 @@ defmodule Tango.OAuthFlowIntegrationTest do
       now = DateTime.utc_now()
       assert DateTime.compare(session.expires_at, now) == :gt
 
-      # Step 2: Generate authorization URL
       {:ok, auth_url} =
         Auth.authorize_url(session.session_token,
           redirect_uri: redirect_uri,
@@ -72,10 +70,8 @@ defmodule Tango.OAuthFlowIntegrationTest do
       assert String.contains?(auth_url, "code_challenge=")
       assert String.contains?(auth_url, "code_challenge_method=S256")
 
-      # Step 3: Mock OAuth callback (simulate provider response)
       mock_auth_code = "mock_authorization_code_12345"
 
-      # Step 4: Exchange authorization code for tokens (using encoded state)
       {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
 
       {:ok, connection} =
@@ -357,10 +353,8 @@ defmodule Tango.OAuthFlowIntegrationTest do
           with_metadata: true
         )
 
-      # Step 1: Create session
       {:ok, session} = Auth.create_session(provider.slug, tenant_id)
 
-      # Step 2: Generate authorization URL with metadata params
       {:ok, auth_url} =
         Auth.authorize_url(session.session_token,
           redirect_uri: "https://myapp.com/callback"
@@ -370,7 +364,6 @@ defmodule Tango.OAuthFlowIntegrationTest do
       assert String.contains?(auth_url, "access_type=offline")
       assert String.contains?(auth_url, "prompt=consent")
 
-      # Step 3: Extract state and complete exchange
       {:ok, encoded_state} = OAuthFlowHelper.extract_state_from_auth_url(auth_url)
 
       {:ok, connection} =
@@ -378,7 +371,6 @@ defmodule Tango.OAuthFlowIntegrationTest do
           redirect_uri: "https://myapp.com/callback"
         )
 
-      # Step 4: Verify connection was created successfully
       assert connection.status == :active
       assert connection.access_token == "mock_access_token_with_refresh"
       # Note: refresh_token handling is tested elsewhere
@@ -479,7 +471,7 @@ defmodule Tango.OAuthFlowIntegrationTest do
               redirect_uri: "https://myapp.com/callback"
             )
           rescue
-            FunctionClauseError -> {:error, :invalid_input}
+            _e in [FunctionClauseError, ArgumentError] -> {:error, :invalid_input}
           end
 
         assert match?({:error, _}, result)

@@ -45,6 +45,7 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     scopes: :string
   ]
 
+  @doc "Runs the mix task."
   def run([provider_name | _] = args) when is_binary(provider_name) do
     {opts, _args, _} = OptionParser.parse(args, switches: @switches)
 
@@ -62,6 +63,7 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     end
   end
 
+  @doc false
   def run(_args) do
     ProviderHelper.display_general_usage()
   end
@@ -70,42 +72,38 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     Shell.info("📡 Fetching provider configuration for '#{provider_name}'...")
 
     case Tango.Catalog.get_provider(provider_name) do
-      {:ok, nango_config} ->
-        if nango_config["auth_mode"] == "API_KEY" do
-          Shell.error("❌ Provider '#{provider_name}' uses API key authentication")
-          Shell.info("   Use: mix tango.providers.create #{provider_name} --api-key=xxx")
-        else
-          # Parse and combine scopes from catalog and user input
-          combined_scopes = ProviderHelper.parse_scopes(nango_config, opts)
+      {:ok, nango_config} -> handle_oauth2_config(provider_name, nango_config, opts)
+      {:error, :not_found} -> handle_oauth2_not_found(provider_name)
+      {:error, reason} -> Shell.error("Failed to fetch catalog: #{inspect(reason)}")
+    end
+  end
 
-          case Tango.Provider.create_provider_from_nango(provider_name, nango_config,
-                 client_id: opts[:client_id],
-                 client_secret: opts[:client_secret],
-                 default_scopes: combined_scopes
-               ) do
-            {:ok, provider} ->
-              ProviderHelper.display_provider_success(provider, "OAuth2")
+  defp handle_oauth2_config(provider_name, %{"auth_mode" => "API_KEY"}, _opts) do
+    Shell.error("Error: Provider '#{provider_name}' uses API key authentication")
+    Shell.info("   Use: mix tango.providers.create #{provider_name} --api-key=xxx")
+  end
 
-            {:error, changeset} ->
-              ProviderHelper.display_creation_error(changeset)
-          end
-        end
+  defp handle_oauth2_config(provider_name, nango_config, opts) do
+    combined_scopes = ProviderHelper.parse_scopes(nango_config, opts)
 
-      {:error, :not_found} ->
-        Shell.error("Provider '#{provider_name}' not found in catalog")
-        suggestions = Tango.Catalog.suggest_similar(provider_name)
+    case Tango.Provider.create_provider_from_nango(provider_name, nango_config,
+           client_id: opts[:client_id],
+           client_secret: opts[:client_secret],
+           default_scopes: combined_scopes
+         ) do
+      {:ok, provider} -> ProviderHelper.display_provider_success(provider, "OAuth2")
+      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
+    end
+  end
 
-        if length(suggestions) > 0 do
-          Shell.info("")
-          Shell.info("Did you mean one of these?")
+  defp handle_oauth2_not_found(provider_name) do
+    Shell.error("Provider '#{provider_name}' not found in catalog")
+    suggestions = Tango.Catalog.suggest_similar(provider_name)
 
-          Enum.each(suggestions, fn name ->
-            Shell.info("  - #{name}")
-          end)
-        end
-
-      {:error, reason} ->
-        Shell.error("Failed to fetch catalog: #{inspect(reason)}")
+    if suggestions != [] do
+      Shell.info("")
+      Shell.info("Did you mean one of these?")
+      Enum.each(suggestions, fn name -> Shell.info("  - #{name}") end)
     end
   end
 
@@ -113,50 +111,47 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     Shell.info("📡 Checking provider configuration for '#{provider_name}'...")
 
     case Tango.Catalog.get_provider(provider_name) do
-      {:ok, nango_config} ->
-        if nango_config["auth_mode"] != "API_KEY" do
-          Shell.error("❌ Provider '#{provider_name}' uses OAuth2 authentication")
+      {:ok, nango_config} -> handle_api_key_config(provider_name, nango_config, opts)
+      {:error, :not_found} -> handle_api_key_not_found(provider_name, opts)
+      {:error, reason} -> Shell.error("Failed to fetch catalog: #{inspect(reason)}")
+    end
+  end
 
-          Shell.info(
-            "   Use: mix tango.providers.create #{provider_name} --client-id=xxx --client-secret=yyy"
-          )
-        else
-          config_with_credentials =
-            nango_config
-            |> put_in(["api_key"], opts[:api_key])
+  defp handle_api_key_config(provider_name, %{"auth_mode" => auth_mode}, opts)
+       when auth_mode != "API_KEY" do
+    Shell.error("Error: Provider '#{provider_name}' uses OAuth2 authentication")
 
-          case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
-            {:ok, provider} ->
-              ProviderHelper.display_provider_success(provider, "API Key")
+    Shell.info(
+      "   Use: mix tango.providers.create #{provider_name} --client-id=xxx --client-secret=yyy"
+    )
 
-            {:error, changeset} ->
-              ProviderHelper.display_creation_error(changeset)
-          end
-        end
+    opts
+  end
 
-      {:error, :not_found} ->
-        # For API key providers not in catalog, create a simple one
-        Shell.info("Provider not found in catalog, creating simple API key provider...")
+  defp handle_api_key_config(provider_name, nango_config, opts) do
+    config_with_credentials = put_in(nango_config, ["api_key"], opts[:api_key])
 
-        config = %{
-          name: provider_name,
-          display_name: String.capitalize(provider_name),
-          config: %{
-            "auth_mode" => "API_KEY",
-            "api_key" => opts[:api_key]
-          }
-        }
+    case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
+      {:ok, provider} -> ProviderHelper.display_provider_success(provider, "API Key")
+      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
+    end
+  end
 
-        case Tango.Provider.create_provider(config) do
-          {:ok, provider} ->
-            ProviderHelper.display_provider_success(provider, "API Key (Simple)")
+  defp handle_api_key_not_found(provider_name, opts) do
+    Shell.info("Provider not found in catalog, creating simple API key provider...")
 
-          {:error, changeset} ->
-            ProviderHelper.display_creation_error(changeset)
-        end
+    config = %{
+      name: provider_name,
+      display_name: String.capitalize(provider_name),
+      config: %{
+        "auth_mode" => "API_KEY",
+        "api_key" => opts[:api_key]
+      }
+    }
 
-      {:error, reason} ->
-        Shell.error("Failed to fetch catalog: #{inspect(reason)}")
+    case Tango.Provider.create_provider(config) do
+      {:ok, provider} -> ProviderHelper.display_provider_success(provider, "API Key (Simple)")
+      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
     end
   end
 end

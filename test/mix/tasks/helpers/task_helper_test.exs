@@ -73,7 +73,6 @@ defmodule Mix.Tasks.Helpers.TaskHelperTest do
       original_repo = Application.get_env(:tango, :repo)
 
       try do
-        # Set a test repo configuration
         Application.put_env(:tango, :repo, Tango.TestRepo)
 
         # Should attempt to start the configured repo

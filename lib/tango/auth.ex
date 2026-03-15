@@ -9,8 +9,7 @@ defmodule Tango.Auth do
   import Ecto.Query, warn: false
   require Logger
 
-  # Repo will be configured by the host application
-  @repo Application.compile_env(:tango, :repo, Tango.Repo)
+  defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
 
   alias Tango.Schemas.{AuditLog, Connection, OAuthSession}
 
@@ -58,7 +57,7 @@ defmodule Tango.Auth do
       AuditLog.log_oauth_start(provider, tenant_id, session, opts)
       |> repo.insert()
     end)
-    |> @repo.transaction()
+    |> repo().transaction()
     |> case do
       {:ok, %{create_session: session}} ->
         {:ok, session}
@@ -108,9 +107,7 @@ defmodule Tango.Auth do
         "final_auth_params_keys=#{inspect(Map.keys(auth_params))}"
     )
 
-    auth_url = build_authorization_url(oauth_config.auth_url, auth_params)
-
-    {:ok, auth_url}
+    {:ok, build_authorization_url(oauth_config.auth_url, auth_params)}
   end
 
   defp build_base_auth_params(oauth_config, session, redirect_uri, scopes) do
@@ -258,7 +255,7 @@ defmodule Tango.Auth do
       AuditLog.log_token_exchange(session, connection, true)
       |> repo.insert()
     end)
-    |> @repo.transaction()
+    |> repo().transaction()
     |> case do
       {:ok, %{create_connection: connection}} ->
         {:ok, connection}
@@ -306,18 +303,18 @@ defmodule Tango.Auth do
 
     {count, _} =
       from(s in OAuthSession, where: s.expires_at < ^expired_cutoff)
-      |> @repo.delete_all()
+      |> repo().delete_all()
 
     if count > 0 do
       AuditLog.log_session_cleanup(count)
-      |> @repo.insert()
+      |> repo().insert()
     end
 
     {:ok, count}
   end
 
   defp get_valid_session(session_token) do
-    case @repo.get_by(OAuthSession, session_token: session_token) do
+    case repo().get_by(OAuthSession, session_token: session_token) do
       nil ->
         {:error, :session_not_found}
 
@@ -331,7 +328,7 @@ defmodule Tango.Auth do
   end
 
   defp get_session_by_state(state, tenant_id) do
-    case @repo.get_by(OAuthSession, state: state, tenant_id: tenant_id) do
+    case repo().get_by(OAuthSession, state: state, tenant_id: tenant_id) do
       nil ->
         {:error, :session_not_found}
 
@@ -379,16 +376,7 @@ defmodule Tango.Auth do
     with client <- build_oauth_client(oauth_config, opts),
          token_params <- build_token_params(authorization_code, session, validated_redirect_uri),
          _ <- log_token_exchange_params(token_params, session),
-         {:ok, %{token: token} = response} <- OAuth2.Client.get_token(client, token_params),
-         _ <-
-           Logger.info("DEBUG: OAuth2.Client.get_token raw response: #{inspect(response)}"),
-         _ <-
-           Logger.info(
-             "Tango OAuth raw token from OAuth2 library: access_token_present=#{is_binary(token.access_token)}, " <>
-               "refresh_token=#{inspect(token.refresh_token)}, " <>
-               "expires_at=#{inspect(token.expires_at)}, " <>
-               "other_params=#{inspect(token.other_params)}"
-           ),
+         {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
          :ok <- validate_access_token(token.access_token) do
       token_response = convert_token_to_response(token)
 
@@ -444,9 +432,10 @@ defmodule Tango.Auth do
   defp add_redirect_uri_if_present(params, session, validated_redirect_uri) do
     redirect_uri = session.redirect_uri || validated_redirect_uri
 
-    case should_include_redirect_uri?(redirect_uri) do
-      true -> Keyword.put(params, :redirect_uri, redirect_uri)
-      false -> params
+    if should_include_redirect_uri?(redirect_uri) do
+      Keyword.put(params, :redirect_uri, redirect_uri)
+    else
+      params
     end
   end
 
@@ -482,27 +471,15 @@ defmodule Tango.Auth do
 
   @doc false
   def convert_token_to_response(token) do
-    # OAuth2 library sometimes returns JSON-encoded token responses
-    # Extract the actual access token from JSON if needed
     access_token = extract_access_token(token.access_token)
 
-    result = %{
+    %{
       "access_token" => access_token,
       "refresh_token" => token.refresh_token,
       "token_type" => token.token_type,
       "expires_in" => calculate_expires_in_seconds(token.expires_at),
       "scope" => token.other_params["scope"]
     }
-
-    Logger.info(
-      "DEBUG: convert_token_to_response - Input token: refresh_token=#{inspect(token.refresh_token)}, expires_at=#{inspect(token.expires_at)}, other_params=#{inspect(token.other_params)}"
-    )
-
-    Logger.info(
-      "DEBUG: convert_token_to_response - Output: #{inspect(Map.drop(result, ["access_token"]))}"
-    )
-
-    result
   end
 
   # Extract actual access token from potentially JSON-encoded response
@@ -544,7 +521,7 @@ defmodule Tango.Auth do
           session
           |> OAuthSession.changeset(%{redirect_uri: redirect_uri})
 
-        @repo.update(changeset)
+        repo().update(changeset)
 
       ^redirect_uri ->
         # Same redirect_uri, no update needed
@@ -570,10 +547,9 @@ defmodule Tango.Auth do
         :ok
 
       {nil, _provided} ->
-        # Session was created without redirect_uri, but one is provided in exchange
-        # This can happen in tests or when authorize_url step was skipped
-        # We'll allow this but ideally the full OAuth flow should be used
-        :ok
+        # RFC 6749 §4.1.3: redirect URI binding required
+        # If session didn't store a redirect_uri, exchange must fail
+        {:error, :redirect_uri_mismatch}
 
       {stored, nil} ->
         # Session was created with redirect_uri, but none provided in exchange
@@ -636,7 +612,7 @@ defmodule Tango.Auth do
         case get_session_by_state(original_state, tenant_id) do
           {:ok, session} ->
             AuditLog.log_token_exchange(session, nil, false, reason)
-            |> @repo.insert()
+            |> repo().insert()
 
           _ ->
             :ok
@@ -756,13 +732,12 @@ defmodule Tango.Auth do
     }
 
     AuditLog.log_oauth_callback_error(event_type, error_code, tenant_id, session_id, event_data)
-    |> Application.get_env(:tango, :repo, Tango.TestRepo).insert()
+    |> repo().insert()
     |> case do
       {:ok, _} ->
         :ok
 
       {:error, reason} ->
-        require Logger
         Logger.warning("Failed to log OAuth callback error: #{inspect(reason)}")
         :ok
     end
@@ -901,21 +876,8 @@ defmodule Tango.Auth do
                   setTimeout(() => window.close(), 100);
                 } catch (originError) {
                   console.error('Tango callback - Could not access opener origin:', originError);
-                  // Fallback to wildcard origin (less secure but functional)
-                  window.opener.postMessage({
-                    type: 'oauth_complete',
-                    connection: {
-                      provider: exchangeResult.provider,
-                      status: exchangeResult.status,
-                      scopes: exchangeResult.scopes || [],
-                      expires_at: exchangeResult.expires_at,
-                      token: exchangeResult.access_token
-                    }
-                  }, '*');
-                  console.log('Tango callback - PostMessage sent with wildcard origin');
-                  
-                  // Close popup after successful message
-                  setTimeout(() => window.close(), 100);
+                  document.getElementById('status').textContent = 'OAuth completed but could not communicate with parent window. Please close this window and try again.';
+                  return;
                 }
               } else {
                 console.error('Tango callback - No window.opener found');
@@ -935,10 +897,7 @@ defmodule Tango.Auth do
                     error: error.message
                   }, targetOrigin);
                 } catch (originError) {
-                  window.opener.postMessage({
-                    type: 'oauth_error',
-                    error: error.message
-                  }, '*');
+                  console.error('Tango callback - Could not send error to opener:', originError);
                 }
               }
 

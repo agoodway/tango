@@ -97,7 +97,6 @@ defmodule Mix.Tasks.Helpers.ProviderHelperValidationTest do
 
   describe "display functions" do
     test "print_changeset_errors/1 formats errors correctly" do
-      # Create a changeset with errors using the schema module
       changeset = ProviderSchema.changeset(%ProviderSchema{}, %{name: ""})
 
       output =

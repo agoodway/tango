@@ -91,18 +91,19 @@ CREATE TABLE IF NOT EXISTS "$SCHEMA$".tango_connections (
     access_token BYTEA NOT NULL,
     refresh_token BYTEA,
     token_type VARCHAR DEFAULT 'bearer' NOT NULL,
-    expires_at TIMESTAMP,
+    expires_at TIMESTAMPTZ,
     granted_scopes TEXT[] DEFAULT '{}',
     raw_payload JSONB DEFAULT '{}',
     metadata JSONB DEFAULT '{}',
     status VARCHAR DEFAULT 'active' NOT NULL,
-    last_used_at TIMESTAMP,
+    last_used_at TIMESTAMPTZ,
     refresh_attempts INTEGER DEFAULT 0 NOT NULL,
     last_refresh_failure TEXT,
-    next_refresh_at TIMESTAMP,
+    next_refresh_at TIMESTAMPTZ,
     refresh_exhausted BOOLEAN DEFAULT false NOT NULL,
     auto_refresh_enabled BOOLEAN DEFAULT true NOT NULL,
     connection_config JSONB DEFAULT '{}' NOT NULL,
+    lock_version INTEGER NOT NULL DEFAULT 1,
     inserted_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
@@ -142,8 +143,8 @@ WHERE status = 'active';
 -- Immutable audit records - no updated_at field for security/compliance
 CREATE TABLE IF NOT EXISTS "$SCHEMA$".tango_audit_logs (
     id BIGSERIAL PRIMARY KEY,
-    provider_id BIGINT REFERENCES "$SCHEMA$".tango_providers(id) ON DELETE CASCADE,
-    connection_id BIGINT REFERENCES "$SCHEMA$".tango_connections(id) ON DELETE CASCADE,
+    provider_id BIGINT REFERENCES "$SCHEMA$".tango_providers(id) ON DELETE SET NULL,
+    connection_id BIGINT REFERENCES "$SCHEMA$".tango_connections(id) ON DELETE SET NULL,
     session_id VARCHAR,
     tenant_id VARCHAR NOT NULL,
     event_type VARCHAR NOT NULL,
@@ -153,7 +154,7 @@ CREATE TABLE IF NOT EXISTS "$SCHEMA$".tango_audit_logs (
     sensitive_data_hash VARCHAR,
     user_agent TEXT,
     ip_address VARCHAR,
-    occurred_at TIMESTAMP NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
     inserted_at TIMESTAMP NOT NULL
 );
 

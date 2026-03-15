@@ -44,7 +44,6 @@ defmodule Tango.SecurityTest do
       tenant_a = "tenant-a-123"
       tenant_b = "tenant-b-456"
 
-      # Create sessions with same provider for different tenants
       {:ok, session_a} = Auth.create_session(provider.slug, tenant_a)
       {:ok, session_b} = Auth.create_session(provider.slug, tenant_b)
 
@@ -58,7 +57,6 @@ defmodule Tango.SecurityTest do
       {:ok, provider} = create_test_provider("duplicate_test")
       _state = "duplicate-state"
 
-      # Create a shared state for testing duplicates
       shared_state = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
 
       # Insert first session (with proper token lengths)
