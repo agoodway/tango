@@ -1,7 +1,7 @@
 defmodule Tango.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.1.1"
   @source_url "https://github.com/agoodway/tango"
 
   def project do
@@ -39,14 +39,14 @@ defmodule Tango.MixProject do
   defp deps do
     [
       # Database and encryption
-      {:postgrex, "~> 0.22", optional: true},
+      {:postgrex, "~> 0.19", optional: true},
       {:ecto, "~> 3.13"},
       {:ecto_sql, "~> 3.13"},
       {:cloak_ecto, "~> 1.3"},
       {:plug, "~> 1.19"},
 
       # Optional Phoenix/LiveView for component library
-      {:phoenix, "~> 1.8", optional: true},
+      {:phoenix, "~> 1.7", optional: true},
       {:phoenix_live_view, "~> 1.1", optional: true},
 
       # Migration system
@@ -63,7 +63,7 @@ defmodule Tango.MixProject do
 
       # Utility libraries
       {:nimble_options, "~> 1.0"},
-      {:telemetry, "~> 1.4"},
+      {:telemetry, "~> 1.0"},
 
       # Development and testing dependencies
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

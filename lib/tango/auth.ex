@@ -854,31 +854,32 @@ defmodule Tango.Auth do
               // Send success result to parent window
               if (window.opener) {
                 console.log('Tango callback - Sending postMessage to opener');
-                console.log('Tango callback - Current origin:', window.location.origin);
-                
+
+                // Determine target origin: try reading opener's origin, fall back to "*"
+                // Cross-origin popups (e.g. API on :4000, frontend on :3000) cannot
+                // read window.opener.location.origin due to COOP restrictions
+                let targetOrigin = '*';
                 try {
-                  const targetOrigin = window.opener.location.origin;
-                  console.log('Tango callback - Target origin:', targetOrigin);
-                  
-                  window.opener.postMessage({
-                    type: 'oauth_complete',
-                    connection: {
-                      provider: exchangeResult.provider,
-                      status: exchangeResult.status,
-                      scopes: exchangeResult.scopes || [],
-                      expires_at: exchangeResult.expires_at,
-                      token: exchangeResult.access_token
-                    }
-                  }, targetOrigin);
-                  console.log('Tango callback - PostMessage sent successfully');
-                  
-                  // Close popup after successful message
-                  setTimeout(() => window.close(), 100);
-                } catch (originError) {
-                  console.error('Tango callback - Could not access opener origin:', originError);
-                  document.getElementById('status').textContent = 'OAuth completed but could not communicate with parent window. Please close this window and try again.';
-                  return;
+                  targetOrigin = window.opener.location.origin;
+                } catch (_e) {
+                  console.log('Tango callback - Cross-origin opener, using wildcard targetOrigin');
                 }
+                console.log('Tango callback - Target origin:', targetOrigin);
+
+                window.opener.postMessage({
+                  type: 'oauth_complete',
+                  connection: {
+                    provider: exchangeResult.provider,
+                    status: exchangeResult.status,
+                    scopes: exchangeResult.scopes || [],
+                    expires_at: exchangeResult.expires_at,
+                    token: exchangeResult.access_token
+                  }
+                }, targetOrigin);
+                console.log('Tango callback - PostMessage sent successfully');
+
+                // Close popup after successful message
+                setTimeout(() => window.close(), 100);
               } else {
                 console.error('Tango callback - No window.opener found');
               }
@@ -890,15 +891,14 @@ defmodule Tango.Auth do
 
               // Send error to parent window
               if (window.opener) {
+                let errorTargetOrigin = '*';
                 try {
-                  const targetOrigin = window.opener.location.origin;
-                  window.opener.postMessage({
-                    type: 'oauth_error',
-                    error: error.message
-                  }, targetOrigin);
-                } catch (originError) {
-                  console.error('Tango callback - Could not send error to opener:', originError);
-                }
+                  errorTargetOrigin = window.opener.location.origin;
+                } catch (_e) { /* cross-origin */ }
+                window.opener.postMessage({
+                  type: 'oauth_error',
+                  error: error.message
+                }, errorTargetOrigin);
               }
 
               document.getElementById('status').textContent = 'OAuth flow failed: ' + error.message;

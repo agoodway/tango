@@ -470,6 +470,32 @@ defmodule Tango.API.RouterTest do
       assert String.contains?(response.resp_body, "handleCallback")
     end
 
+    @tag :skip_bypass
+    test "callback HTML contains cross-origin postMessage fallback" do
+      # Regression test: the callback JS must fall back to '*' targetOrigin
+      # when window.opener.location.origin is inaccessible (cross-origin popup).
+      # Without this fallback, OAuth popups on a different port (e.g. React :3000
+      # vs Phoenix :4000) silently fail to communicate back to the parent window.
+      conn = conn(:get, "/callback?code=test_code&state=test_state")
+      response = Router.call(conn, Router.init([]))
+
+      assert response.status == 200
+
+      # Success path: must try opener origin, then fall back to '*'
+      assert String.contains?(response.resp_body, "let targetOrigin = '*'")
+      assert String.contains?(response.resp_body, "window.opener.location.origin")
+      assert String.contains?(response.resp_body, "window.opener.postMessage")
+
+      # Error path: must also have the wildcard fallback
+      assert String.contains?(response.resp_body, "let errorTargetOrigin = '*'")
+
+      # Must NOT contain the broken pattern that dead-ends on cross-origin failure
+      refute String.contains?(
+               response.resp_body,
+               "could not communicate with parent window"
+             )
+    end
+
     test "callback URL building uses HTTPS correctly" do
       # Test HTTPS conversion for secure callbacks
       conn =
