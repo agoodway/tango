@@ -97,31 +97,14 @@ config :tango,
 
 ### Migrations
 
-If using Ecto for migrations, generate and run the Tango migration:
+`mix tango.setup` writes a wrapper migration to `priv/repo/migrations/`; `mix ecto.migrate` applies it.
 
 ```bash
-# Generate migration file
-mix ecto.gen.migration add_tango_tables
-
-# Edit the generated migration file to call Tango.Migration:
-# priv/repo/migrations/YYYYMMDDHHMMSS_add_tango_tables.exs
-defmodule MyApp.Repo.Migrations.AddTangoTables do
-  use Ecto.Migration
-
-  def up do
-    Tango.Migration.up()
-  end
-
-  def down do
-    Tango.Migration.down()
-  end
-end
-
-# Run migrations
+mix tango.setup
 mix ecto.migrate
 ```
 
-Otherwise, if not using Ecto migrations, you can copy the SQL from `priv/repo/sql/versions/v01/v01_up.sql` and add it to your migration tool of choice (be sure to replace the schema prefix with "public" or your custom prefix).
+Not using Ecto migrations? Copy the SQL from `priv/repo/sql/versions/v01/v01_up.sql` into your migration tool of choice (replace the schema prefix with `"public"` or your custom prefix).
 
 ## OAuth Providers
 
