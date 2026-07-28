@@ -157,6 +157,165 @@ defmodule Tango.Connection do
   end
 
   @doc """
+  Records the provider rejecting a connection's credentials.
+
+  Consumers call this when a provider answers an API call with HTTP 401 or 403.
+  Tango issues tokens but never sees the calls made with them, so a connection
+  holding credentials the provider has revoked stays `:active` here forever
+  unless the consumer reports it. Once the rejections reach the threshold the
+  connection is expired, `get_connection_for_provider/2` stops handing it out,
+  and the consumer sees `{:error, :not_found}` — its cue to treat the
+  integration as disconnected and prompt the tenant to reconnect.
+
+  `opts[:max_failures]` sets the expiry threshold (default 3), per call rather
+  than library-wide: one Tango deployment serves many providers, each called on
+  its own cadence, and the count is a number of rejections rather than a
+  duration. Callers hitting a provider every few seconds pass a higher ceiling
+  than one sweeping twice an hour, or the same transient outage expires far
+  more of their connections.
+
+  This is not a refresh failure. A connection carrying no refresh token or no
+  expiry is never eligible for refresh, so `refresh_connection/1` never runs and
+  its counters never move, no matter how long the credentials have been dead.
+
+  Only active connections accept a report: a connection revoked or expired
+  between the failing API call and the report is left exactly as it is —
+  `:revoked` and `:expired` age out on different schedules, so a late report
+  must not convert one into the other. The count is read from a freshly loaded
+  row locked for the update, never from the caller's copy, so concurrent
+  reporters serialize instead of clobbering each other or raising
+  `Ecto.StaleEntryError` on a stale struct.
+
+  Accepts a `%Connection{}`, or a connection id together with `opts[:tenant_id]`
+  (a bare id is not proof of access, so id-based reports carry the tenant scope
+  every other lookup in this module requires). Returns `{:error, :not_found}`
+  when the connection does not exist, is not active, or belongs to another
+  tenant, and `{:error, :tenant_id_required}` for an id without a tenant.
+
+  ## Examples
+
+      iex> record_auth_failure(connection, "http_401")
+      {:ok, %Connection{auth_failures: 1}}
+
+      iex> record_auth_failure(connection_id, "http_401", tenant_id: "user-123", max_failures: 10)
+      {:ok, %Connection{auth_failures: 1}}
+
+  """
+  def record_auth_failure(connection, error_reason, opts \\ [])
+
+  def record_auth_failure(%Connection{} = connection, error_reason, opts) do
+    do_record_auth_failure(connection.id, connection.tenant_id, error_reason, opts)
+  end
+
+  def record_auth_failure(connection_id, error_reason, opts) when is_integer(connection_id) do
+    case Keyword.fetch(opts, :tenant_id) do
+      {:ok, tenant_id} when is_binary(tenant_id) ->
+        do_record_auth_failure(connection_id, tenant_id, error_reason, opts)
+
+      _missing ->
+        {:error, :tenant_id_required}
+    end
+  end
+
+  defp do_record_auth_failure(connection_id, tenant_id, error_reason, opts) do
+    Ecto.Multi.new()
+    |> Ecto.Multi.run(:load, fn repo, _changes ->
+      lock_active_connection(repo, connection_id, tenant_id)
+    end)
+    |> Ecto.Multi.update(:connection, fn %{load: connection} ->
+      Connection.record_auth_failure(connection, error_reason, opts)
+    end)
+    |> Ecto.Multi.run(:audit_log, fn repo, %{connection: updated_connection} ->
+      AuditLog.log_connection_event(:connection_auth_failed, updated_connection, false, %{
+        reason: to_string(error_reason),
+        auth_failures: updated_connection.auth_failures,
+        expired: updated_connection.status == :expired
+      })
+      |> repo.insert()
+    end)
+    |> repo().transaction()
+    |> case do
+      {:ok, %{connection: updated_connection}} -> {:ok, updated_connection}
+      {:error, _op, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Clears a connection's rejection streak after its credentials authenticate again.
+
+  Keeps `record_auth_failure/3` counting *consecutive* rejections: without this,
+  isolated failures spread over months would accumulate to the threshold and
+  expire a connection that works. The streak is checked in the database rather
+  than on the caller's copy — a struct loaded before another process recorded a
+  failure would otherwise skip the clear and leave a phantom strike behind. When
+  there is no streak the update matches no row and the call is a single no-op
+  statement, so reporting success after every provider call stays cheap.
+
+  Accepts a `%Connection{}`, or a connection id together with `opts[:tenant_id]`.
+  Returns `:ok` whether or not anything needed clearing (an inactive or already
+  clean connection has no streak worth reporting), and
+  `{:error, :tenant_id_required}` for an id without a tenant.
+
+  ## Examples
+
+      iex> record_auth_success(connection)
+      :ok
+
+      iex> record_auth_success(connection_id, tenant_id: "user-123")
+      :ok
+
+  """
+  def record_auth_success(connection, opts \\ [])
+
+  def record_auth_success(%Connection{} = connection, _opts) do
+    clear_auth_failure_streak(connection.id, connection.tenant_id)
+  end
+
+  def record_auth_success(connection_id, opts) when is_integer(connection_id) do
+    case Keyword.fetch(opts, :tenant_id) do
+      {:ok, tenant_id} when is_binary(tenant_id) ->
+        clear_auth_failure_streak(connection_id, tenant_id)
+
+      _missing ->
+        {:error, :tenant_id_required}
+    end
+  end
+
+  # A single conditional UPDATE: the `auth_failures > 0` predicate makes the
+  # no-streak case match zero rows, and counter resets from concurrent
+  # reporters are idempotent, so neither a lock nor a prior read is needed.
+  defp clear_auth_failure_streak(connection_id, tenant_id) do
+    from(c in Connection,
+      where: c.id == ^connection_id,
+      where: c.tenant_id == ^tenant_id,
+      where: c.status == :active,
+      where: c.auth_failures > 0
+    )
+    |> repo().update_all(set: [auth_failures: 0, last_auth_failure: nil])
+
+    :ok
+  end
+
+  # Loads the connection for a failure report inside the reporting transaction.
+  # Row-locked so concurrent reports increment in sequence rather than racing
+  # the optimistic lock; scoped to `:active` so a report landing after a revoke
+  # or expiry cannot move a connection between terminal states — `:revoked`
+  # rows are kept while `:expired` rows are deleted 30 days on.
+  defp lock_active_connection(repo, connection_id, tenant_id) do
+    from(c in Connection,
+      where: c.id == ^connection_id,
+      where: c.tenant_id == ^tenant_id,
+      where: c.status == :active,
+      lock: "FOR UPDATE"
+    )
+    |> repo.one()
+    |> case do
+      nil -> {:error, :not_found}
+      connection -> {:ok, connection}
+    end
+  end
+
+  @doc """
   Refreshes an OAuth connection's access token.
 
   Attempts to refresh the access token using the refresh token.

@@ -92,6 +92,11 @@ defmodule Mix.Tasks.Tango.Setup do
       use Ecto.Migration
 
       def up, do: Tango.Migration.up()
+
+      # Initial-install rollback: targets version 0 and drops every Tango
+      # table. Upgrades to later schema versions belong in their own migration
+      # pinning the range (`up(version: N)` / `down(version: N - 1)`) — see
+      # "Upgrading an existing install" in the Tango README.
       def down, do: Tango.Migration.down()
     end
     """

@@ -294,6 +294,24 @@ defmodule Tango.Schemas.ConnectionTest do
       # This is the actual behavior: [] || connection.granted_scopes = [] (empty list is truthy)
       assert get_change(changeset, :granted_scopes) == []
     end
+
+    test "clears a rejection streak, since a refreshed token authenticates again" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "old_token",
+        status: :active,
+        auth_failures: 2,
+        last_auth_failure: "http_401"
+      }
+
+      token_response = %{"access_token" => "new_token", "expires_in" => 3600}
+
+      changeset = Connection.refresh_changeset(connection, token_response)
+
+      assert get_change(changeset, :auth_failures) == 0
+      assert get_change(changeset, :last_auth_failure) == nil
+    end
   end
 
   describe "record_refresh_failure/2" do
@@ -354,6 +372,168 @@ defmodule Tango.Schemas.ConnectionTest do
 
       assert changeset.valid?
       assert get_change(changeset, :last_refresh_failure) == "network_timeout"
+    end
+  end
+
+  describe "record_auth_failure/2" do
+    test "records the first rejection without expiring the connection" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 0
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401")
+
+      assert changeset.valid?
+      assert get_change(changeset, :auth_failures) == 1
+      assert get_change(changeset, :last_auth_failure) == "http_401"
+      refute Map.has_key?(changeset.changes, :status)
+    end
+
+    test "expires the connection once the rejections reach the threshold" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 2
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401")
+
+      assert changeset.valid?
+      assert get_change(changeset, :auth_failures) == 3
+      assert get_change(changeset, :status) == :expired
+    end
+
+    test "converts a reason term to a string" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 0
+      }
+
+      changeset = Connection.record_auth_failure(connection, :invalid_credentials)
+
+      assert changeset.valid?
+      assert get_change(changeset, :last_auth_failure) == "invalid_credentials"
+    end
+
+    test "a caller's higher threshold defers expiry past the default ceiling" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 2
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401", max_failures: 5)
+
+      assert get_change(changeset, :auth_failures) == 3
+      refute Map.has_key?(changeset.changes, :status)
+    end
+
+    test "a caller's threshold of one expires the connection on the first rejection" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 0
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401", max_failures: 1)
+
+      assert get_change(changeset, :auth_failures) == 1
+      assert get_change(changeset, :status) == :expired
+    end
+
+    test "keeps a terminal status, never converting :revoked to :expired" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :revoked,
+        auth_failures: 2
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401")
+
+      assert get_change(changeset, :auth_failures) == 3
+      refute Map.has_key?(changeset.changes, :status)
+    end
+
+    test "rejects a threshold that is not a positive integer" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 0
+      }
+
+      for bad <- [0, -1, nil, "3", 2.5] do
+        assert_raise ArgumentError, ~r/:max_failures must be a positive integer/, fn ->
+          Connection.record_auth_failure(connection, "http_401", max_failures: bad)
+        end
+      end
+    end
+
+    test "leaves the refresh counters untouched" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 0,
+        refresh_attempts: 1
+      }
+
+      changeset = Connection.record_auth_failure(connection, "http_401")
+
+      refute Map.has_key?(changeset.changes, :refresh_attempts)
+      refute Map.has_key?(changeset.changes, :refresh_exhausted)
+      refute Map.has_key?(changeset.changes, :last_refresh_failure)
+    end
+  end
+
+  describe "clear_auth_failures/1" do
+    test "clears a partial rejection streak" do
+      connection = %Connection{
+        provider_id: 1,
+        tenant_id: "user-123",
+        access_token: "token",
+        status: :active,
+        auth_failures: 2,
+        last_auth_failure: "http_401"
+      }
+
+      changeset = Connection.clear_auth_failures(connection)
+
+      assert changeset.valid?
+      assert get_change(changeset, :auth_failures) == 0
+      assert get_change(changeset, :last_auth_failure) == nil
+    end
+  end
+
+  describe "auth_failures_exhausted?/2" do
+    test "is false below the threshold" do
+      refute Connection.auth_failures_exhausted?(%Connection{auth_failures: 2})
+    end
+
+    test "is true at the default threshold" do
+      assert Connection.auth_failures_exhausted?(%Connection{auth_failures: 3})
+    end
+
+    test "judges against a caller's threshold" do
+      refute Connection.auth_failures_exhausted?(%Connection{auth_failures: 3}, max_failures: 5)
+      assert Connection.auth_failures_exhausted?(%Connection{auth_failures: 5}, max_failures: 5)
     end
   end
 

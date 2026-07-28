@@ -59,6 +59,7 @@ defmodule Tango.Schemas.AuditLog do
         :oauth_callback_error,
         :token_refreshed,
         :token_refresh_failed,
+        :connection_auth_failed,
         :connection_revoked,
         :connection_expired,
         :provider_created,

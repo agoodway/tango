@@ -283,6 +283,202 @@ defmodule Tango.ConnectionTest do
     end
   end
 
+  describe "record_auth_failure/2" do
+    test "counts a rejection and leaves the connection usable below the threshold" do
+      provider = Factory.create_github_provider("_authfail1")
+      tenant_id = Factory.tenant_id("auth_fail_below")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail1")
+
+      assert {:ok, updated} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert updated.auth_failures == 1
+      assert updated.last_auth_failure == "http_401"
+      assert updated.status == :active
+
+      assert {:ok, _still_served} =
+               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id)
+    end
+
+    test "expires the connection at the threshold, so it is no longer served" do
+      provider = Factory.create_github_provider("_authfail2")
+      tenant_id = Factory.tenant_id("auth_fail_threshold")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail2")
+
+      {:ok, conn} = Tango.Connection.record_auth_failure(conn, "http_401")
+      {:ok, conn} = Tango.Connection.record_auth_failure(conn, "http_401")
+      {:ok, expired} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert expired.auth_failures == 3
+      assert expired.status == :expired
+
+      assert {:error, :not_found} =
+               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id)
+    end
+
+    test "accepts a connection id scoped by tenant" do
+      provider = Factory.create_github_provider("_authfail3")
+      tenant_id = Factory.tenant_id("auth_fail_by_id")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail3")
+
+      assert {:ok, updated} =
+               Tango.Connection.record_auth_failure(conn.id, "http_401", tenant_id: tenant_id)
+
+      assert updated.auth_failures == 1
+      assert updated.last_auth_failure == "http_401"
+    end
+
+    test "requires a tenant with a bare connection id" do
+      assert {:error, :tenant_id_required} = Tango.Connection.record_auth_failure(1, "http_401")
+    end
+
+    test "refuses another tenant's connection id" do
+      provider = Factory.create_github_provider("_authfail6")
+      tenant_id = Factory.tenant_id("auth_fail_cross_tenant")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail6")
+
+      assert {:error, :not_found} =
+               Tango.Connection.record_auth_failure(conn.id, "http_401",
+                 tenant_id: "other-tenant"
+               )
+
+      assert Repo.get(ConnectionSchema, conn.id).auth_failures == 0
+    end
+
+    test "counts from the database row, not the caller's stale struct" do
+      provider = Factory.create_github_provider("_authfail7")
+      tenant_id = Factory.tenant_id("auth_fail_stale")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail7")
+
+      # Two reports through the SAME stale struct: without the fresh row-locked
+      # load this raises Ecto.StaleEntryError on the second (optimistic lock),
+      # or undercounts if the count came from the struct.
+      {:ok, _} = Tango.Connection.record_auth_failure(conn, "http_401")
+      {:ok, second} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert second.auth_failures == 2
+    end
+
+    test "honours a caller's max_failures over the default" do
+      provider = Factory.create_github_provider("_authfail5")
+      tenant_id = Factory.tenant_id("auth_fail_opts")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail5")
+
+      {:ok, conn} = Tango.Connection.record_auth_failure(conn, "http_401", max_failures: 2)
+      assert conn.status == :active
+
+      {:ok, expired} = Tango.Connection.record_auth_failure(conn, "http_401", max_failures: 2)
+
+      assert expired.auth_failures == 2
+      assert expired.status == :expired
+    end
+
+    test "reports an unknown connection id rather than raising" do
+      assert {:error, :not_found} =
+               Tango.Connection.record_auth_failure(-1, "http_401", tenant_id: "anyone")
+    end
+
+    test "leaves a revoked connection revoked, since expired rows are deleted after 30 days" do
+      provider = Factory.create_github_provider("_authfail8")
+      tenant_id = Factory.tenant_id("auth_fail_revoked")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail8")
+
+      {:ok, conn} = Tango.Connection.record_auth_failure(conn, "http_401")
+      {:ok, conn} = Tango.Connection.record_auth_failure(conn, "http_401")
+      {:ok, revoked} = Tango.Connection.revoke_connection(conn, tenant_id)
+      assert revoked.status == :revoked
+
+      # The third strike arrives after the revoke — it must not land.
+      assert {:error, :not_found} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      reloaded = Repo.get(ConnectionSchema, conn.id)
+      assert reloaded.status == :revoked
+      assert reloaded.auth_failures == 2
+    end
+
+    test "expiring a connection records an audit log" do
+      provider = Factory.create_github_provider("_authfail4")
+      tenant_id = Factory.tenant_id("auth_fail_audit")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authfail4")
+
+      {:ok, _} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      log =
+        Tango.Schemas.AuditLog
+        |> where(connection_id: ^conn.id, event_type: :connection_auth_failed)
+        |> Repo.one()
+
+      assert log
+      refute log.success
+    end
+  end
+
+  describe "record_auth_success/2" do
+    test "clears a partial rejection streak" do
+      provider = Factory.create_github_provider("_authok1")
+      tenant_id = Factory.tenant_id("auth_success_clears")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authok1")
+
+      {:ok, failed} = Tango.Connection.record_auth_failure(conn, "http_401")
+      assert failed.auth_failures == 1
+
+      assert :ok = Tango.Connection.record_auth_success(failed)
+
+      reloaded = Repo.get(ConnectionSchema, conn.id)
+      assert reloaded.auth_failures == 0
+      assert reloaded.last_auth_failure == nil
+    end
+
+    test "is a no-op when there is no streak to clear" do
+      provider = Factory.create_github_provider("_authok2")
+      tenant_id = Factory.tenant_id("auth_success_noop")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authok2")
+
+      assert :ok = Tango.Connection.record_auth_success(conn)
+
+      assert Repo.get(ConnectionSchema, conn.id).updated_at == conn.updated_at
+    end
+
+    test "clears the database streak even through a stale struct" do
+      provider = Factory.create_github_provider("_authok3")
+      tenant_id = Factory.tenant_id("auth_success_stale")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authok3")
+
+      # `conn` still reads auth_failures: 0 in memory; another process has
+      # recorded a strike. Deciding from the struct would leave it behind.
+      {:ok, _} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert :ok = Tango.Connection.record_auth_success(conn)
+
+      assert Repo.get(ConnectionSchema, conn.id).auth_failures == 0
+    end
+
+    test "accepts a connection id scoped by tenant" do
+      provider = Factory.create_github_provider("_authok4")
+      tenant_id = Factory.tenant_id("auth_success_by_id")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authok4")
+
+      {:ok, _} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert :ok = Tango.Connection.record_auth_success(conn.id, tenant_id: tenant_id)
+      assert Repo.get(ConnectionSchema, conn.id).auth_failures == 0
+    end
+
+    test "requires a tenant with a bare connection id" do
+      assert {:error, :tenant_id_required} = Tango.Connection.record_auth_success(1)
+    end
+
+    test "leaves another tenant's streak alone" do
+      provider = Factory.create_github_provider("_authok5")
+      tenant_id = Factory.tenant_id("auth_success_cross_tenant")
+      conn = Factory.create_github_connection(provider, tenant_id, "_authok5")
+
+      {:ok, _} = Tango.Connection.record_auth_failure(conn, "http_401")
+
+      assert :ok = Tango.Connection.record_auth_success(conn.id, tenant_id: "other-tenant")
+      assert Repo.get(ConnectionSchema, conn.id).auth_failures == 1
+    end
+  end
+
   describe "refresh_connection/1" do
     test "validates refresh prerequisites" do
       provider = Factory.create_github_provider("_refresh")

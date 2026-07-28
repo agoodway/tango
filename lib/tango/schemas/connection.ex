@@ -9,6 +9,12 @@ defmodule Tango.Schemas.Connection do
   use Ecto.Schema
   import Ecto.Changeset
 
+  # Rejections that expire a connection when the caller passes no
+  # `:max_failures`. Callers tune the ceiling per provider to match how often
+  # they hit it; refresh keeps its own internal ceiling below.
+  @default_max_auth_failures 3
+  @max_refresh_attempts 3
+
   @type t :: %__MODULE__{
           id: integer() | nil,
           provider_id: integer() | nil,
@@ -27,6 +33,8 @@ defmodule Tango.Schemas.Connection do
           last_refresh_failure: String.t() | nil,
           next_refresh_at: DateTime.t() | nil,
           refresh_exhausted: boolean(),
+          auth_failures: non_neg_integer(),
+          last_auth_failure: String.t() | nil,
           auto_refresh_enabled: boolean(),
           connection_config: map(),
           lock_version: integer(),
@@ -54,6 +62,8 @@ defmodule Tango.Schemas.Connection do
     :last_refresh_failure,
     :next_refresh_at,
     :refresh_exhausted,
+    :auth_failures,
+    :last_auth_failure,
     :auto_refresh_enabled,
     :connection_config,
     :lock_version
@@ -81,6 +91,14 @@ defmodule Tango.Schemas.Connection do
     field(:last_refresh_failure, :string)
     field(:next_refresh_at, :utc_datetime)
     field(:refresh_exhausted, :boolean, default: false)
+
+    # Rejections of the stored credentials by the provider itself, reported by
+    # the consumer rather than observed here. Refreshing a token is a separate
+    # failure mode with its own counters above: a connection can hold a token
+    # the provider rejects while refresh has never once been attempted.
+    field(:auth_failures, :integer, default: 0)
+    field(:last_auth_failure, :string)
+
     field(:auto_refresh_enabled, :boolean, default: true)
 
     # Connection configuration overrides
@@ -98,6 +116,7 @@ defmodule Tango.Schemas.Connection do
     |> cast(attrs, @fields)
     |> validate_required(@required_fields)
     |> validate_number(:refresh_attempts, greater_than_or_equal_to: 0)
+    |> validate_number(:auth_failures, greater_than_or_equal_to: 0)
     |> foreign_key_constraint(:provider_id)
     |> optimistic_lock(:lock_version)
     |> prepare_changes(&normalize_token_type/1)
@@ -133,6 +152,8 @@ defmodule Tango.Schemas.Connection do
       refresh_attempts: 0,
       last_refresh_failure: nil,
       refresh_exhausted: false,
+      auth_failures: 0,
+      last_auth_failure: nil,
       last_used_at: DateTime.utc_now()
     }
 
@@ -142,7 +163,7 @@ defmodule Tango.Schemas.Connection do
   @doc "Records a failed refresh attempt"
   def record_refresh_failure(connection, error_reason) do
     attempts = connection.refresh_attempts + 1
-    max_attempts = 3
+    max_attempts = @max_refresh_attempts
 
     attrs = %{
       refresh_attempts: attempts,
@@ -152,6 +173,73 @@ defmodule Tango.Schemas.Connection do
     }
 
     changeset(connection, attrs)
+  end
+
+  @doc """
+  Records the provider rejecting the stored credentials.
+
+  Consumers report a provider's own rejection — an HTTP 401 or 403 answering an
+  API call — which this library cannot observe for itself. The connection is
+  expired once the rejections reach `opts[:max_failures]` (default
+  #{@default_max_auth_failures}), after which `get_connection_for_provider/2`
+  stops handing it out and the consumer can treat the connection as gone.
+
+  The threshold is per call rather than library-wide because a Tango deployment
+  serves many providers, each called on its own cadence — and the count is a
+  number of rejections, not a duration. A consumer polling a provider every few
+  seconds reaches a given ceiling within seconds of a transient outage, while
+  one sweeping twice an hour takes days to reach the same count; each caller
+  passes the threshold that matches how often it hits that provider.
+
+  A rejection is not a refresh failure and leaves the refresh counters alone.
+  The two are independent: a connection carrying no refresh token and no expiry
+  is never eligible for refresh, so its credentials can be rejected forever
+  while `refresh_attempts` stays at zero.
+
+  Only an `:active` connection is moved to `:expired`; a terminal status is
+  kept, since `:revoked` and `:expired` rows age out on different schedules.
+  Raises `ArgumentError` when `opts[:max_failures]` is not a positive integer.
+  """
+  def record_auth_failure(connection, error_reason, opts \\ []) do
+    failures = connection.auth_failures + 1
+    exhausted = failures >= max_failures!(opts)
+
+    attrs = %{
+      auth_failures: failures,
+      last_auth_failure: to_string(error_reason),
+      status:
+        if(exhausted and connection.status == :active, do: :expired, else: connection.status)
+    }
+
+    changeset(connection, attrs)
+  end
+
+  @doc """
+  Clears a rejection streak after the credentials authenticate again.
+
+  Keeps the count consecutive: without this, unrelated rejections spread over
+  months would accumulate to the threshold and expire a working connection.
+  """
+  def clear_auth_failures(connection) do
+    changeset(connection, %{auth_failures: 0, last_auth_failure: nil})
+  end
+
+  @doc "Whether the provider has rejected these credentials enough times to expire them"
+  def auth_failures_exhausted?(%__MODULE__{auth_failures: failures}, opts \\ []),
+    do: failures >= max_failures!(opts)
+
+  # A threshold that is not a positive integer is a defect at the call site,
+  # not runtime data: zero or a negative expires on the first report, and a
+  # non-integer never compares true against the count.
+  defp max_failures!(opts) do
+    case Keyword.get(opts, :max_failures, @default_max_auth_failures) do
+      max when is_integer(max) and max > 0 ->
+        max
+
+      other ->
+        raise ArgumentError,
+              ":max_failures must be a positive integer, got: #{inspect(other)}"
+    end
   end
 
   @doc "Checks if token needs refresh"

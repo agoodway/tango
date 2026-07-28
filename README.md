@@ -71,7 +71,7 @@ Add `tango` to your dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:tango, "~> 0.1.1"}
+    {:tango, "~> 0.1.2"}
   ]
 end
 ```
@@ -104,7 +104,35 @@ mix tango.setup
 mix ecto.migrate
 ```
 
-Not using Ecto migrations? Copy the SQL from `priv/repo/sql/versions/v01/v01_up.sql` into your migration tool of choice (replace the schema prefix with `"public"` or your custom prefix).
+`mix tango.setup` is for the **initial install only** — its generated `down`
+calls `Tango.Migration.down()`, which targets version 0 and drops every Tango
+table. Never rerun it to pick up a new schema version.
+
+#### Upgrading an existing install
+
+When a Tango release ships a new schema version (see `CHANGELOG`/release
+notes), write a fresh migration in your application pinning the version range
+explicitly, so rolling it back returns to the previous version instead of
+dropping the schema:
+
+```elixir
+defmodule MyApp.Repo.Migrations.UpgradeTangoV2 do
+  use Ecto.Migration
+
+  def up, do: Tango.Migration.up(version: 2)
+  def down, do: Tango.Migration.down(version: 1)
+end
+```
+
+Not using Ecto migrations? Copy the SQL from `priv/repo/sql/versions/<version>/`
+into your migration tool of choice (replace the `$SCHEMA$` placeholder with
+`"public"` or your custom prefix), and stamp the version marker EctoEvolver
+would have written, so `Tango.Migration.migrated_version/1` agrees with the
+physical schema:
+
+```sql
+COMMENT ON TABLE "$SCHEMA$".tango_providers IS 'Tango version=2';
+```
 
 ## OAuth Providers
 
@@ -258,6 +286,25 @@ headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 
 # Mark connection as used (updates last_used_at)
 Tango.mark_connection_used(connection)
+
+# Report what the provider said, so revoked credentials can be retired.
+# Three consecutive rejections (tune per provider with :max_failures — the
+# count is rejections, not elapsed time, so match it to your call cadence)
+# expire the connection, and get_connection_for_provider/2 stops serving it.
+#
+# Report a 401, which means the credentials themselves were rejected. Do NOT
+# blanket-report 403: providers use it for insufficient scope, resource
+# policy, and quota, and three of those in a row would expire a healthy
+# connection — classify a 403 from its provider-specific error body first.
+case call_the_provider(connection) do
+  {:ok, result} ->
+    Tango.record_auth_success(connection)
+    {:ok, result}
+
+  {:error, {:http_error, 401, _body}} ->
+    Tango.record_auth_failure(connection, "http_401", max_failures: 3)
+    {:error, :unauthorized}
+end
 ```
 
 ## Ready-to-Use OAuth API

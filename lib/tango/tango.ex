@@ -205,6 +205,47 @@ defmodule Tango do
   defdelegate refresh_connection(connection), to: Tango.Connection
 
   @doc """
+  Records the provider rejecting a connection's credentials.
+
+  Call this when a provider rejects the connection's credentials outright — an
+  HTTP 401, or a 403 whose provider-specific error body confirms an invalid or
+  revoked token rather than a policy, scope, or quota denial. Tango cannot see
+  the calls made with the tokens it issues, so a revoked credential stays
+  `:active` until a consumer reports the rejection. The connection is expired
+  once the rejections reach `opts[:max_failures]` (default 3), after which
+  `get_connection_for_provider/2` returns `{:error, :not_found}`. Pass a
+  threshold matched to how often the caller hits that provider — the count is a
+  number of rejections, not a duration.
+
+  Accepts a connection, or a connection id together with `opts[:tenant_id]`.
+  Only active connections accept a report.
+
+  ## Examples
+
+      iex> Tango.record_auth_failure(connection, "http_401")
+      {:ok, %Tango.Schemas.Connection{auth_failures: 1}}
+
+      iex> Tango.record_auth_failure(connection_id, "http_401", tenant_id: "user-123", max_failures: 10)
+      {:ok, %Tango.Schemas.Connection{auth_failures: 1}}
+
+  """
+  defdelegate record_auth_failure(connection, error_reason, opts \\ []), to: Tango.Connection
+
+  @doc """
+  Clears a connection's rejection streak after a call authenticates again.
+
+  Pairs with `record_auth_failure/3` to keep its count consecutive. Accepts a
+  connection, or a connection id together with `opts[:tenant_id]`.
+
+  ## Examples
+
+      iex> Tango.record_auth_success(connection)
+      :ok
+
+  """
+  defdelegate record_auth_success(connection, opts \\ []), to: Tango.Connection
+
+  @doc """
   Marks connection as used (updates timestamp).
 
   ## Examples

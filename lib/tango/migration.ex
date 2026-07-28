@@ -42,6 +42,6 @@ defmodule Tango.Migration do
   use EctoEvolver,
     otp_app: :tango,
     default_prefix: Application.compile_env(:tango, :schema_prefix, "public"),
-    versions: [Tango.Migrations.V01],
+    versions: [Tango.Migrations.V01, Tango.Migrations.V02],
     tracking_object: {:table, "tango_providers"}
 end
