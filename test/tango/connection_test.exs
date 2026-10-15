@@ -8,7 +8,7 @@ defmodule Tango.ConnectionTest do
 
   use Tango.DatabaseCase, async: false
 
-  alias Tango.Factory
+  alias Tango.{Factory, OAuthMockServer}
   alias Tango.Schemas.Connection, as: ConnectionSchema
 
   describe "list_connections/2" do
@@ -177,6 +177,95 @@ defmodule Tango.ConnectionTest do
   end
 
   describe "get_connection_for_provider/3 with auto_refresh" do
+    setup do
+      bypass = Bypass.open()
+      {:ok, bypass: bypass, urls: OAuthMockServer.google_urls(bypass)}
+    end
+
+    test "returns the row's token when another caller already refreshed it", %{urls: urls} do
+      provider = Factory.create_google_provider("_refresh_winner", urls: urls)
+      tenant_id = Factory.tenant_id("refresh_winner")
+      conn = Factory.create_connection(provider, tenant_id)
+      stale = %{conn | expires_at: DateTime.add(DateTime.utc_now(), 60, :second)}
+
+      {:ok, _winner} =
+        conn
+        |> ConnectionSchema.changeset(%{
+          access_token: "winner_access_token",
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second)
+        })
+        |> Repo.update()
+
+      assert {:ok, served} = Tango.Connection.refresh_if_needed(stale)
+      assert served.access_token == "winner_access_token"
+      assert Repo.get!(ConnectionSchema, conn.id).refresh_attempts == 0
+    end
+
+    test "keeps serving a still-valid access token when refresh fails", %{
+      bypass: bypass,
+      urls: urls
+    } do
+      OAuthMockServer.setup_google_oauth(bypass, should_fail: true)
+      provider = Factory.create_google_provider("_refresh_still_valid", urls: urls)
+      tenant_id = Factory.tenant_id("refresh_still_valid")
+      conn = expire_in(Factory.create_connection(provider, tenant_id), 60)
+
+      assert {:ok, served} =
+               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id,
+                 auto_refresh: true
+               )
+
+      assert served.access_token == conn.access_token
+      assert Repo.get!(ConnectionSchema, conn.id).refresh_attempts == 1
+    end
+
+    test "returns refresh_failed and records the failure once the token has expired",
+         %{bypass: bypass, urls: urls} do
+      OAuthMockServer.setup_google_oauth(bypass, should_fail: true)
+      provider = Factory.create_google_provider("_refresh_expired", urls: urls)
+      tenant_id = Factory.tenant_id("refresh_expired")
+      conn = expire_in(Factory.create_connection(provider, tenant_id), -60)
+
+      assert {:error, {:refresh_failed, "http_400:invalid_grant"}} =
+               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id,
+                 auto_refresh: true
+               )
+
+      failed = Repo.get!(ConnectionSchema, conn.id)
+      assert failed.refresh_attempts == 1
+      assert failed.last_refresh_failure == "http_400:invalid_grant"
+
+      assert Repo.exists?(
+               from(l in Tango.Schemas.AuditLog,
+                 where: l.connection_id == ^conn.id and l.event_type == :token_refresh_failed
+               )
+             )
+    end
+
+    test "returns refresh_not_allowed for an expired token that cannot refresh", %{urls: urls} do
+      for {suffix, attrs} <- [
+            {"_no_token", %{refresh_token: nil}},
+            {"_disabled", %{auto_refresh_enabled: false}},
+            {"_exhausted", %{refresh_exhausted: true}}
+          ] do
+        provider = Factory.create_google_provider("_not_allowed" <> suffix, urls: urls)
+        tenant_id = Factory.tenant_id("not_allowed" <> suffix)
+
+        {:ok, _conn} =
+          provider
+          |> Factory.create_connection(tenant_id)
+          |> ConnectionSchema.changeset(
+            Map.put(attrs, :expires_at, DateTime.add(DateTime.utc_now(), -60, :second))
+          )
+          |> Repo.update()
+
+        assert {:error, {:refresh_failed, :refresh_not_allowed}} =
+                 Tango.Connection.get_connection_for_provider(provider.slug, tenant_id,
+                   auto_refresh: true
+                 )
+      end
+    end
+
     test "returns connection without refresh when auto_refresh is false" do
       provider = Factory.create_github_provider("_auto_refresh_false")
       tenant_id = "tenant_auto_refresh_false_test"
@@ -543,6 +632,19 @@ defmodule Tango.ConnectionTest do
   end
 
   describe "refresh_expiring_connections/0" do
+    test "does not count a failed refresh of a still-valid token as refreshed" do
+      bypass = Bypass.open()
+      OAuthMockServer.setup_google_oauth(bypass, should_fail: true)
+
+      provider =
+        Factory.create_google_provider("_sweep_fail", urls: OAuthMockServer.google_urls(bypass))
+
+      conn = expire_in(Factory.create_connection(provider, Factory.tenant_id("sweep_fail")), 60)
+
+      assert {:ok, 0} = Tango.Connection.refresh_expiring_connections()
+      assert Repo.get!(ConnectionSchema, conn.id).refresh_attempts == 1
+    end
+
     test "identifies and processes expiring connections" do
       provider = Factory.create_github_provider("_batch_refresh")
 
@@ -902,6 +1004,17 @@ defmodule Tango.ConnectionTest do
       assert {:error, :not_found} =
                Tango.Connection.get_connection_for_provider(provider.name, tenant_id)
     end
+  end
+
+  defp expire_in(connection, seconds) do
+    {:ok, updated} =
+      connection
+      |> ConnectionSchema.changeset(%{
+        expires_at: DateTime.add(DateTime.utc_now(), seconds, :second)
+      })
+      |> Repo.update()
+
+    updated
   end
 
   describe "OAuth2 client configuration for token refresh" do

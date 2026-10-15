@@ -105,6 +105,8 @@ defmodule Tango.Connection do
 
   Provider is identified by slug, not name. When auto_refresh is true,
   automatically refreshes the token if it's about to expire (within 5 minutes).
+  Returns `{:error, {:refresh_failed, reason}}` when an expired token cannot
+  be refreshed.
 
   ## Examples
 
@@ -123,21 +125,78 @@ defmodule Tango.Connection do
   end
 
   defp maybe_auto_refresh(connection, false), do: {:ok, connection}
+  defp maybe_auto_refresh(connection, true), do: refresh_if_needed(connection)
 
-  defp maybe_auto_refresh(connection, true) do
-    if should_refresh?(connection) do
-      case refresh_connection(connection) do
-        {:ok, refreshed} -> {:ok, refreshed}
-        {:error, _} -> {:ok, connection}
-      end
-    else
-      {:ok, connection}
+  @doc """
+  Refreshes a connection's access token when it is about to expire.
+
+  The connection row is locked while checking its expiry and requesting a token,
+  so concurrent callers reuse the first caller's result. A failed or disallowed
+  refresh still serves a valid access token, but reports an expired one as an error.
+  """
+  @spec refresh_if_needed(Connection.t()) ::
+          {:ok, Connection.t()} | {:error, {:refresh_failed, term()}} | {:error, :not_found}
+  def refresh_if_needed(%Connection{id: id}) do
+    case locked_refresh(id) do
+      {:current, connection} -> {:ok, connection}
+      {:refreshed, connection} -> {:ok, connection}
+      {:failed, reason, connection} -> serve_unless_expired(reason, connection)
+      {:error, _reason} = error -> error
     end
   end
 
-  defp should_refresh?(%Connection{} = connection) do
-    Connection.needs_refresh?(connection) and Connection.can_refresh?(connection)
+  defp locked_refresh(id) do
+    fn ->
+      case lock_active_connection(id) do
+        {:ok, locked} -> refresh_locked(locked)
+        {:error, :not_found} = not_found -> not_found
+      end
+    end
+    |> repo().transaction()
+    |> case do
+      {:ok, outcome} -> outcome
+      {:error, reason} -> {:error, {:refresh_failed, {:transaction_failed, reason}}}
+    end
   end
+
+  defp lock_active_connection(id) do
+    from(c in Connection,
+      where: c.id == ^id and c.status == :active,
+      lock: "FOR UPDATE",
+      preload: [:provider]
+    )
+    |> repo().one()
+    |> case do
+      nil -> {:error, :not_found}
+      connection -> {:ok, connection}
+    end
+  end
+
+  defp refresh_locked(connection) do
+    case {Connection.needs_refresh?(connection), Connection.can_refresh?(connection)} do
+      {false, _can_refresh} -> {:current, connection}
+      {true, false} -> {:failed, :refresh_not_allowed, connection}
+      {true, true} -> attempt_refresh(connection)
+    end
+  end
+
+  defp attempt_refresh(connection) do
+    case refresh_connection(connection) do
+      {:ok, refreshed} -> {:refreshed, refreshed}
+      {:error, reason} -> {:failed, reason, connection}
+    end
+  end
+
+  defp serve_unless_expired(reason, connection) do
+    if token_expired?(connection),
+      do: {:error, {:refresh_failed, reason}},
+      else: {:ok, connection}
+  end
+
+  defp token_expired?(%Connection{expires_at: nil}), do: false
+
+  defp token_expired?(%Connection{expires_at: expires_at}),
+    do: DateTime.compare(expires_at, DateTime.utc_now()) != :gt
 
   @doc """
   Updates connection usage timestamp.
@@ -404,8 +463,9 @@ defmodule Tango.Connection do
 
     results =
       connections
-      |> Enum.map(&refresh_connection/1)
-      |> Enum.group_by(&elem(&1, 0))
+      |> Enum.map(&locked_refresh(&1.id))
+      |> Enum.reject(&match?({:current, _connection}, &1))
+      |> Enum.group_by(&sweep_outcome/1)
 
     success_count = Map.get(results, :ok, []) |> length()
     failure_count = Map.get(results, :error, []) |> length()
@@ -422,6 +482,9 @@ defmodule Tango.Connection do
 
     {:ok, success_count}
   end
+
+  defp sweep_outcome({:refreshed, _connection}), do: :ok
+  defp sweep_outcome(_failed_or_error), do: :error
 
   @doc """
   Revokes a connection.
@@ -650,11 +713,22 @@ defmodule Tango.Connection do
     |> build_refresh_client(connection.refresh_token)
     |> OAuth2.Client.get_token()
     |> case do
-      {:ok, %{token: token}} -> {:ok, convert_token_to_response(token, connection)}
-      {:error, %OAuth2.Error{reason: reason}} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{token: token}} ->
+        {:ok, convert_token_to_response(token, connection)}
+
+      {:error, %OAuth2.Error{reason: reason}} ->
+        {:error, reason}
+
+      {:error, %OAuth2.Response{status_code: status, body: body}} ->
+        {:error, "http_#{status}:#{oauth_error_code(body)}"}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp oauth_error_code(%{"error" => code}) when is_binary(code), do: code
+  defp oauth_error_code(_body), do: "unknown"
 
   defp build_refresh_client(oauth_config, refresh_token) do
     OAuth2.Client.new(

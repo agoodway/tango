@@ -1,7 +1,7 @@
 defmodule Tango.MixProject do
   use Mix.Project
 
-  @version "0.1.2"
+  @version "0.1.3"
   @source_url "https://github.com/agoodway/tango"
 
   def project do
@@ -40,8 +40,8 @@ defmodule Tango.MixProject do
     [
       # Database and encryption
       {:postgrex, "~> 0.19", optional: true},
-      {:ecto, "~> 3.13"},
-      {:ecto_sql, "~> 3.13"},
+      {:ecto, "~> 3.14"},
+      {:ecto_sql, "~> 3.14"},
       {:cloak_ecto, "~> 1.3"},
       {:plug, "~> 1.19"},
 
@@ -71,7 +71,7 @@ defmodule Tango.MixProject do
       {:credo, "~> 1.7.17", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.2", only: [:dev, :test], runtime: false},
       {:ex_dna, "~> 1.2", only: [:dev, :test], runtime: false},
-      {:doctor, "~> 0.22.0", only: [:dev, :test], runtime: false},
+      {:doctor, "~> 0.23.0", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
       {:bypass, "~> 2.1", only: :test}
     ]

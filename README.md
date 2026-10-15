@@ -71,7 +71,7 @@ Add `tango` to your dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:tango, "~> 0.1.2"}
+    {:tango, "~> 0.1.3"}
   ]
 end
 ```
@@ -417,6 +417,10 @@ connections = Tango.list_connections(user_id)
 # Get connection for API calls
 {:ok, connection} = Tango.get_connection_for_provider("github", user_id)
 headers = [{"Authorization", "Bearer #{connection.access_token}"}]
+
+# With auto-refresh, an expired token that cannot be refreshed returns
+# {:error, {:refresh_failed, reason}}.
+{:ok, connection} = Tango.get_connection_for_provider("github", user_id, auto_refresh: true)
 
 # Revoke connection
 {:ok, _revoked} = Tango.revoke_connection(connection, user_id)
