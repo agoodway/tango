@@ -452,4 +452,31 @@ defmodule Tango.ValidationTest do
       end)
     end
   end
+
+  describe "parse_scopes/1" do
+    test "splits on spaces and commas" do
+      assert Validation.parse_scopes("user:email repo") == ["user:email", "repo"]
+      assert Validation.parse_scopes("user:email,repo") == ["user:email", "repo"]
+      assert Validation.parse_scopes("a, b  c") == ["a", "b", "c"]
+      assert Validation.parse_scopes(["already", "list"]) == ["already", "list"]
+      assert Validation.parse_scopes(nil) == []
+    end
+  end
+
+  describe "origin/1" do
+    test "reduces a URL to its exact web origin" do
+      assert Validation.origin("https://app.example.com/api/oauth/callback?x=1") ==
+               "https://app.example.com"
+
+      assert Validation.origin("https://app.example.com:443/path") == "https://app.example.com"
+      assert Validation.origin("http://localhost:4000/") == "http://localhost:4000"
+      assert Validation.origin("http://[::1]:4000/callback") == "http://[::1]:4000"
+    end
+
+    test "returns nil for values without a scheme and host" do
+      assert Validation.origin("/relative/path") == nil
+      assert Validation.origin("not a url") == nil
+      assert Validation.origin(nil) == nil
+    end
+  end
 end

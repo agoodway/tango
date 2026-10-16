@@ -40,6 +40,11 @@ defmodule Tango do
   defdelegate create_session(provider_name, tenant_id, opts \\ []), to: Tango.Auth
 
   @doc """
+  Creates an authorization session with server-bound intent and completion data.
+  """
+  defdelegate create_authorization_session(provider_name, tenant_id, opts), to: Tango.Auth
+
+  @doc """
   Generates OAuth authorization URL with PKCE support.
 
   ## Examples
@@ -63,6 +68,51 @@ defmodule Tango do
 
   """
   defdelegate exchange_code(state, code, tenant_id, opts), to: Tango.Auth
+
+  @doc """
+  Exchanges an authorization code into an encrypted, short-lived candidate.
+  """
+  defdelegate stage_authorization(state, code, tenant_id, opts), to: Tango.Authorization
+
+  @doc """
+  Deletes expired and consumed authorization candidates.
+
+  Returns `{:ok, deleted_count}`. Token columns are wiped before the rows are
+  deleted, and the audit entry records only the count and a cleanup category.
+
+  Tango does not start a scheduler. Schedule this from the consuming
+  application's own job runner (Oban, Quantum, a GenServer timer, ...) together
+  with `Tango.cleanup_expired_sessions/0`, which is also unscheduled by default.
+  Run this function first so candidate credentials are wiped before the sessions
+  they belong to are deleted:
+
+      def perform(_job) do
+        {:ok, _candidates} = Tango.cleanup_expired_authorizations()
+        {:ok, _sessions} = Tango.cleanup_expired_sessions()
+        :ok
+      end
+
+  Running it every few minutes keeps the candidate table small, since candidates
+  live for at most ten minutes.
+  """
+  defdelegate cleanup_expired_authorizations(), to: Tango.Authorization
+
+  @doc """
+  Verifies a staged authorization candidate with a trusted server callback.
+  """
+  defdelegate verify_authorization(handle, tenant_id, verifier, opts), to: Tango.Authorization
+
+  @doc """
+  Adds atomic authorization finalization to a consumer-owned Ecto.Multi.
+  """
+  defdelegate multi_finalize_authorization(multi, name, handle, tenant_id, opts),
+    to: Tango.Authorization
+
+  @doc """
+  Verifies and conditionally binds the identity of an active connection.
+  """
+  defdelegate verify_connection_identity(connection_id, tenant_id, verifier),
+    to: Tango.Authorization
 
   @doc """
   Gets OAuth session by token.
@@ -192,6 +242,11 @@ defmodule Tango do
   """
   defdelegate get_connection_for_provider(provider_name, tenant_id), to: Tango.Connection
   defdelegate get_connection_for_provider(provider_name, tenant_id, opts), to: Tango.Connection
+
+  @doc """
+  Gets an active connection by ID with tenant isolation and optional refresh.
+  """
+  defdelegate get_active_connection(connection_id, tenant_id, opts \\ []), to: Tango.Connection
 
   @doc """
   Refreshes an OAuth connection's access token.

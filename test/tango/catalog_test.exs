@@ -10,7 +10,13 @@ defmodule Tango.CatalogTest do
   alias Tango.Catalog
   alias Tango.CatalogMockServer
 
-  setup do
+  # Tests tagged `:offline` exercise pure functions and never fetch the
+  # catalog, so they skip the strict Bypass expectation.
+  setup tags do
+    if tags[:offline], do: {:ok, %{}}, else: setup_catalog()
+  end
+
+  defp setup_catalog do
     bypass = Bypass.open()
     CatalogMockServer.setup_catalog_endpoint(bypass)
 
@@ -36,8 +42,8 @@ defmodule Tango.CatalogTest do
 
       # Should be a map with string keys
       assert is_map(catalog)
-      # Our mock has exactly 7 providers
-      assert map_size(catalog) == 7
+      # Our mock has exactly 12 providers
+      assert map_size(catalog) == 12
 
       # Verify expected mock providers are present
       expected_providers = [
@@ -47,7 +53,12 @@ defmodule Tango.CatalogTest do
         "stripe",
         "notion",
         "basic-auth-provider",
-        "minimal-provider"
+        "minimal-provider",
+        "google-calendar",
+        "github-app",
+        "salesforce",
+        "zendesk",
+        "figma"
       ]
 
       for provider <- expected_providers do
@@ -80,7 +91,7 @@ defmodule Tango.CatalogTest do
         assert Map.has_key?(config, "auth_mode"),
                "Provider #{provider_name} missing auth_mode"
 
-        assert config["auth_mode"] in ["OAUTH2", "API_KEY", "BASIC"],
+        assert config["auth_mode"] in ["OAUTH2", "API_KEY", "BASIC", "APP"],
                "Provider #{provider_name} has invalid auth_mode: #{config["auth_mode"]}"
 
         # All providers should have docs
@@ -195,7 +206,9 @@ defmodule Tango.CatalogTest do
 
       for {provider_name, config} <- catalog do
         for field <- url_fields do
-          if Map.has_key?(config, field) and config[field] != nil do
+          # Templated URLs (`${connectionConfig.*}`, `a || b`) are resolved
+          # when a provider is created, not in the catalog.
+          if is_binary(config[field]) and not String.contains?(config[field], "${") do
             url = config[field]
 
             assert String.starts_with?(url, "https://"),
@@ -210,6 +223,98 @@ defmodule Tango.CatalogTest do
           end
         end
       end
+    end
+  end
+
+  describe "alias resolution" do
+    test "an alias entry inherits its parent's OAuth2 settings" do
+      {:ok, config} = Catalog.get_provider("google-calendar")
+      {:ok, google} = Catalog.get_provider("google")
+
+      assert config["auth_mode"] == "OAUTH2"
+      assert config["authorization_url"] == google["authorization_url"]
+      assert config["token_url"] == google["token_url"]
+      assert config["auth_url"] == google["auth_url"]
+      assert config["default_scopes"] == google["default_scopes"]
+      assert config["authorization_params"] == google["authorization_params"]
+      assert config["alias"] == "google"
+    end
+
+    test "the alias entry's own keys override the parent's" do
+      {:ok, config} = Catalog.get_provider("google-calendar")
+
+      assert config["display_name"] == "Google Calendar"
+      assert config["categories"] == ["calendar"]
+      assert config["proxy"] == %{"base_url" => "https://www.googleapis.com/calendar"}
+      assert config["docs"] == "https://docs.nango.dev/integrations/all/google-calendar"
+      assert config["name"] == "google-calendar"
+    end
+
+    test "an alias can override the parent's auth mode and URLs" do
+      {:ok, config} = Catalog.get_provider("github-app")
+
+      assert config["auth_mode"] == "APP"
+      assert config["authorization_url"] == "${connectionConfig.appPublicLink}/installations/new"
+      assert config["default_scopes"] == ["repo", "user"]
+    end
+  end
+
+  describe "resolve_aliases/1" do
+    @describetag :offline
+
+    test "merges shallowly, as Nango does: nested maps are replaced, not merged" do
+      raw = %{
+        "parent" => %{"auth_mode" => "OAUTH2", "proxy" => %{"base_url" => "a", "x" => 1}},
+        "child" => %{"alias" => "parent", "proxy" => %{"base_url" => "b"}}
+      }
+
+      resolved = Catalog.resolve_aliases(raw)
+
+      assert resolved["child"]["proxy"] == %{"base_url" => "b"}
+      assert resolved["child"]["auth_mode"] == "OAUTH2"
+      assert resolved["parent"] == raw["parent"]
+    end
+
+    test "resolves alias chains regardless of order" do
+      raw = %{
+        "a-grandchild" => %{"alias" => "b-child", "display_name" => "Grandchild"},
+        "b-child" => %{"alias" => "c-root", "display_name" => "Child"},
+        "c-root" => %{"auth_mode" => "OAUTH2", "token_url" => "https://root/token"}
+      }
+
+      resolved = Catalog.resolve_aliases(raw)
+
+      assert resolved["a-grandchild"]["token_url"] == "https://root/token"
+      assert resolved["a-grandchild"]["auth_mode"] == "OAUTH2"
+      assert resolved["a-grandchild"]["display_name"] == "Grandchild"
+      assert resolved["a-grandchild"]["alias"] == "b-child"
+    end
+
+    test "keeps an entry whose parent is missing as-is" do
+      raw = %{"orphan" => %{"alias" => "missing", "display_name" => "Orphan"}}
+
+      assert Catalog.resolve_aliases(raw) == raw
+    end
+
+    test "does not loop on alias cycles" do
+      raw = %{
+        "a" => %{"alias" => "b", "display_name" => "A"},
+        "b" => %{"alias" => "a", "display_name" => "B"},
+        "self" => %{"alias" => "self", "display_name" => "Self"}
+      }
+
+      resolved = Catalog.resolve_aliases(raw)
+
+      assert resolved["a"]["display_name"] == "A"
+      assert resolved["b"]["display_name"] == "B"
+      assert resolved["self"] == raw["self"]
+      refute Map.has_key?(resolved["a"], "auth_mode")
+    end
+
+    test "ignores non-map entries and non-string aliases" do
+      raw = %{"weird" => "not a map", "bad" => %{"alias" => 42, "display_name" => "Bad"}}
+
+      assert Catalog.resolve_aliases(raw) == raw
     end
   end
 

@@ -49,6 +49,8 @@ defmodule Tango.Schemas.Connection do
   @fields [
     :provider_id,
     :tenant_id,
+    :account_subject,
+    :oauth_client_id,
     :access_token,
     :refresh_token,
     :token_type,
@@ -74,6 +76,8 @@ defmodule Tango.Schemas.Connection do
   schema "tango_connections" do
     belongs_to(:provider, Tango.Schemas.Provider)
     field(:tenant_id, :string)
+    field(:account_subject, :string)
+    field(:oauth_client_id, :string)
 
     # Encrypted token storage
     field(:access_token, Tango.Types.EncryptedBinary)
@@ -131,7 +135,7 @@ defmodule Tango.Schemas.Connection do
       refresh_token: token_response["refresh_token"],
       token_type: normalize_token_type_value(token_response["token_type"]),
       expires_at: calculate_expiration(token_response["expires_in"]),
-      granted_scopes: parse_scopes(token_response["scope"]),
+      granted_scopes: Tango.Validation.parse_scopes(token_response["scope"]),
       raw_payload: sanitize_raw_payload(token_response),
       status: :active,
       last_used_at: DateTime.utc_now()
@@ -147,7 +151,7 @@ defmodule Tango.Schemas.Connection do
       access_token: token_response["access_token"],
       refresh_token: token_response["refresh_token"] || connection.refresh_token,
       expires_at: calculate_expiration(token_response["expires_in"]),
-      granted_scopes: parse_scopes(token_response["scope"]),
+      granted_scopes: refresh_scopes(token_response, connection.granted_scopes),
       raw_payload: Map.merge(connection.raw_payload || %{}, sanitize_raw_payload(token_response)),
       refresh_attempts: 0,
       last_refresh_failure: nil,
@@ -304,14 +308,10 @@ defmodule Tango.Schemas.Connection do
     DateTime.add(DateTime.utc_now(), 5 * 60, :second)
   end
 
-  defp parse_scopes(scope) when is_binary(scope) do
-    scope
-    |> String.split(~r/\s+/)
-    |> Enum.reject(&(&1 == ""))
-  end
+  defp refresh_scopes(%{"scope" => scope}, _existing) when is_binary(scope) or is_list(scope),
+    do: Tango.Validation.parse_scopes(scope)
 
-  defp parse_scopes(scopes) when is_list(scopes), do: scopes
-  defp parse_scopes(_), do: []
+  defp refresh_scopes(_response, existing), do: existing
 
   # Remove sensitive tokens from raw_payload to prevent unencrypted storage
   defp sanitize_raw_payload(token_response) when is_map(token_response) do

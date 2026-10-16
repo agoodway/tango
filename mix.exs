@@ -1,7 +1,7 @@
 defmodule Tango.MixProject do
   use Mix.Project
 
-  @version "0.1.3"
+  @version "0.2.0"
   @source_url "https://github.com/agoodway/tango"
 
   def project do
@@ -106,14 +106,30 @@ defmodule Tango.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib assets priv .formatter.exs mix.exs README.md LICENSE)
+      files: ~w(lib assets priv docs .formatter.exs mix.exs README.md LICENSE)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"],
+      extras: [
+        "README.md",
+        "docs/SETUP.md",
+        "docs/PROVIDERS.md",
+        "docs/USAGE.md",
+        "docs/AUTHORIZATION.md",
+        "docs/API.md"
+      ],
+      groups_for_extras: [
+        Guides: [
+          "docs/SETUP.md",
+          "docs/PROVIDERS.md",
+          "docs/USAGE.md",
+          "docs/AUTHORIZATION.md",
+          "docs/API.md"
+        ]
+      ],
       source_url: @source_url
     ]
   end

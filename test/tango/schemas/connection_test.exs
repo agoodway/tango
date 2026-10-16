@@ -290,9 +290,7 @@ defmodule Tango.Schemas.ConnectionTest do
 
       changeset = Connection.refresh_changeset(connection, token_response)
 
-      # When scope isn't in response (nil), parse_scopes returns [], so existing scopes are NOT preserved
-      # This is the actual behavior: [] || connection.granted_scopes = [] (empty list is truthy)
-      assert get_change(changeset, :granted_scopes) == []
+      assert get_field(changeset, :granted_scopes) == ["existing", "scopes"]
     end
 
     test "clears a rejection streak, since a refreshed token authenticates again" do

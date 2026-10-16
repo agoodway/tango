@@ -146,55 +146,6 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
   end
 
   @doc """
-  Creates API key provider from catalog configuration.
-  """
-  def create_api_key_provider_from_config(provider_name, nango_config, credentials) do
-    config_with_credentials = put_in(nango_config, ["api_key"], credentials.api_key)
-
-    case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
-      {:ok, provider} ->
-        display_provider_success(provider, "API Key")
-        {:ok, provider}
-
-      {:error, changeset} ->
-        Shell.error("Error: Failed to create provider:")
-        print_changeset_errors(changeset)
-        {:error, changeset}
-    end
-  end
-
-  @doc """
-  Creates a simple API key provider when not found in catalog.
-  """
-  def create_simple_api_key_provider(provider_name, credentials) do
-    Shell.info("Provider not found in catalog, creating simple API key provider...")
-
-    config = %{
-      "name" => String.capitalize(provider_name),
-      "slug" => provider_name,
-      "auth_mode" => "API_KEY",
-      "api_config" => %{
-        "headers" => %{
-          "authorization" => "Bearer ${api_key}"
-        }
-      }
-    }
-
-    case Tango.Provider.create_provider_from_nango(provider_name, config,
-           api_key: credentials.api_key
-         ) do
-      {:ok, provider} ->
-        display_provider_success(provider, "API Key (Simple)")
-        {:ok, provider}
-
-      {:error, changeset} ->
-        Shell.error("Error: Failed to create simple provider:")
-        print_changeset_errors(changeset)
-        {:error, changeset}
-    end
-  end
-
-  @doc """
   Displays successful provider creation message.
 
   Shows provider details including optional default scopes for OAuth2 providers.
@@ -254,8 +205,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
     )
 
     Shell.info("")
-    Shell.info("For API key providers:")
-    Shell.info("  mix tango.providers.create #{provider_name} --api-key=xxx")
+    Shell.info("API key providers are not supported; Tango only supports OAuth2.")
   end
 
   @doc """
@@ -269,6 +219,5 @@ defmodule Mix.Tasks.Helpers.ProviderHelper do
     Shell.info("")
     Shell.info("Examples:")
     Shell.info("  mix tango.providers.create github --client-id=xxx --client-secret=yyy")
-    Shell.info("  mix tango.providers.create stripe --api-key=sk_live_xxx")
   end
 end

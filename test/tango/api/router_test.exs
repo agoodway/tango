@@ -11,6 +11,8 @@ defmodule Tango.API.RouterTest do
   alias Tango.TestRepo
   @redirect_uri "http://localhost:3000/callback"
 
+  defp hashed_state(state), do: :crypto.hash(:sha256, state) |> Base.encode16(case: :lower)
+
   setup do
     # Set up test repo and clean state
     :ok = SQL.Sandbox.checkout(TestRepo)
@@ -236,11 +238,13 @@ defmodule Tango.API.RouterTest do
 
       log = hd(audit_logs)
       assert log.tenant_id == "test-tenant"
-      assert log.session_id == session.state
+      assert log.session_id == hashed_state(session.state)
       assert log.success == false
       assert log.error_code == :access_denied
       assert log.event_data["oauth_error"] == "access_denied"
-      assert log.event_data["error_description"] == "The user denied the request"
+      assert log.event_data["has_error_description"] == true
+      refute Map.has_key?(log.event_data, "error_description")
+      refute inspect(log.event_data) =~ "denied the request"
     end
 
     test "logs oauth_provider_error for server errors", %{provider: provider} do
@@ -275,7 +279,7 @@ defmodule Tango.API.RouterTest do
 
       log = hd(audit_logs)
       assert log.tenant_id == "test-tenant"
-      assert log.session_id == session.state
+      assert log.session_id == hashed_state(session.state)
       assert log.success == false
       assert log.error_code == :server_error
       assert log.event_data["oauth_error"] == "server_error"
@@ -365,12 +369,16 @@ defmodule Tango.API.RouterTest do
             from(a in Tango.Schemas.AuditLog,
               where:
                 a.event_type == :oauth_provider_error and
-                  fragment("?->>'oauth_error' = ?", a.event_data, ^oauth_error)
+                  fragment(
+                    "?->>'oauth_error' = ?",
+                    a.event_data,
+                    ^Atom.to_string(expected_error_code)
+                  )
             )
           )
 
         assert audit_log.error_code == expected_error_code
-        assert audit_log.event_data["oauth_error"] == oauth_error
+        assert audit_log.event_data["oauth_error"] == Atom.to_string(expected_error_code)
       end
     end
   end
@@ -416,25 +424,25 @@ defmodule Tango.API.RouterTest do
 
   describe "callback functionality" do
     @tag :skip_bypass
-    test "callback without code/state returns null exchange result" do
+    test "callback without code/state posts nothing" do
       conn = conn(:get, "/callback")
       response = Router.call(conn, Router.init([]))
 
       assert response.status == 200
-      assert String.contains?(response.resp_body, "exchangeResult = null")
+      assert String.contains?(response.resp_body, "const payload = null;")
+      assert String.contains?(response.resp_body, "const completionOrigin = null;")
     end
 
     @tag :skip_bypass
-    test "callback with invalid state returns error exchange result" do
+    test "callback with invalid state posts nothing" do
       invalid_state = "invalid_encoded_state_12345"
 
       conn = conn(:get, "/callback?code=valid_code&state=#{invalid_state}")
       response = Router.call(conn, Router.init([]))
 
       assert response.status == 200
-      # Should contain error in exchange result
-      assert String.contains?(response.resp_body, "\"error\":")
-      assert String.contains?(response.resp_body, "exchangeResult")
+      assert String.contains?(response.resp_body, "const payload = null;")
+      assert String.contains?(response.resp_body, "const completionOrigin = null;")
     end
 
     @tag :skip_bypass
@@ -444,7 +452,9 @@ defmodule Tango.API.RouterTest do
 
       assert response.status == 200
       assert String.contains?(response.resp_body, "Content-Security-Policy")
-      assert String.contains?(response.resp_body, "script-src 'self' 'unsafe-inline'")
+      assert String.contains?(response.resp_body, "script-src 'unsafe-inline'")
+      assert [csp] = get_resp_header(response, "content-security-policy")
+      assert String.contains?(csp, "default-src 'none'")
     end
 
     @tag :skip_bypass
@@ -466,34 +476,25 @@ defmodule Tango.API.RouterTest do
       # Should not contain unescaped script tags from the malicious input
       refute String.contains?(response.resp_body, "<script>alert('xss')</script>")
       refute String.contains?(response.resp_body, "javascript:")
-      # But should contain legitimate script tags (the callback function)
-      assert String.contains?(response.resp_body, "handleCallback")
+      # But should contain the legitimate script element
+      assert String.contains?(response.resp_body, "window.opener.postMessage")
     end
 
     @tag :skip_bypass
-    test "callback HTML contains cross-origin postMessage fallback" do
-      # Regression test: the callback JS must fall back to '*' targetOrigin
-      # when window.opener.location.origin is inaccessible (cross-origin popup).
-      # Without this fallback, OAuth popups on a different port (e.g. React :3000
-      # vs Phoenix :4000) silently fail to communicate back to the parent window.
+    test "callback HTML never falls back to a wildcard target origin" do
       conn = conn(:get, "/callback?code=test_code&state=test_state")
       response = Router.call(conn, Router.init([]))
 
       assert response.status == 200
 
-      # Success path: must try opener origin, then fall back to '*'
-      assert String.contains?(response.resp_body, "let targetOrigin = '*'")
-      assert String.contains?(response.resp_body, "window.opener.location.origin")
-      assert String.contains?(response.resp_body, "window.opener.postMessage")
-
-      # Error path: must also have the wildcard fallback
-      assert String.contains?(response.resp_body, "let errorTargetOrigin = '*'")
-
-      # Must NOT contain the broken pattern that dead-ends on cross-origin failure
-      refute String.contains?(
+      assert String.contains?(
                response.resp_body,
-               "could not communicate with parent window"
+               "window.opener.postMessage(payload, completionOrigin)"
              )
+
+      refute String.contains?(response.resp_body, "'*'")
+      refute String.contains?(response.resp_body, "location.origin")
+      refute String.contains?(response.resp_body, "console.")
     end
 
     test "callback URL building uses HTTPS correctly" do
@@ -508,8 +509,7 @@ defmodule Tango.API.RouterTest do
       response = Router.call(conn, Router.init([]))
 
       assert response.status == 200
-      # The callback should handle HTTP -> HTTPS conversion internally
-      assert String.contains?(response.resp_body, "exchangeResult")
+      assert String.contains?(response.resp_body, "const payload = null;")
     end
   end
 

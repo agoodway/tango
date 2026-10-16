@@ -7,22 +7,9 @@ defmodule Tango.Types.EncryptedBinary do
   and credentials.
   """
 
+  # `cast/1` comes from `Cloak.Ecto.Binary`: nil and binaries cast as-is,
+  # zero-arity closures are unwrapped, and everything else returns `:error`.
   use Cloak.Ecto.Binary, vault: Tango.Vault
-
-  @doc """
-  Encrypts a plaintext string for database storage.
-
-  ## Examples
-
-      iex> Tango.Types.EncryptedBinary.cast("sensitive_token")
-      {:ok, "sensitive_token"}
-      
-      iex> Tango.Types.EncryptedBinary.cast(nil)
-      {:ok, nil}
-  """
-  def cast(nil), do: {:ok, nil}
-  def cast(value) when is_binary(value), do: {:ok, value}
-  def cast(_), do: :error
 
   @doc """
   Loads encrypted data from database and decrypts it.
@@ -42,6 +29,13 @@ defmodule Tango.Types.EncryptedBinary do
   Dumps plaintext data by encrypting it for database storage.
   """
   def dump(nil), do: {:ok, nil}
+
+  def dump(%Tango.RedactedParams.Secret{} = secret) do
+    case Tango.RedactedParams.fetch(secret) do
+      {:ok, plaintext} -> dump(plaintext)
+      :error -> :error
+    end
+  end
 
   def dump(plaintext) when is_binary(plaintext) do
     encrypted = Tango.Vault.encrypt(plaintext)

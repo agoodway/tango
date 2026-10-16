@@ -160,25 +160,57 @@ defmodule Tango.Schemas.AuditLog do
 
   @doc "Logs token exchange completion"
   def log_token_exchange(session, connection, success, error \\ nil) do
-    attrs = %{
+    attrs =
+      session
+      |> token_exchange_attrs(success, error, %{
+        scopes_granted: connection && connection.granted_scopes,
+        token_expires_at: connection && connection.expires_at,
+        token_type: connection && connection.token_type
+      })
+      |> Map.put(:connection_id, connection && connection.id)
+
+    changeset(%__MODULE__{}, attrs)
+  end
+
+  @doc """
+  Logs a staged token exchange without tokens, codes, state, or provider bodies.
+
+  Successes carry the granted scopes and token metadata; failures carry only the
+  stable error category.
+  """
+  def log_staged_exchange(session, {:ok, %{} = staged}) do
+    attrs =
+      token_exchange_attrs(session, true, nil, %{
+        staged: true,
+        scopes_granted: staged.granted_scopes,
+        token_expires_at: staged.token_expires_at,
+        token_type: staged.token_type
+      })
+
+    changeset(%__MODULE__{}, attrs)
+  end
+
+  def log_staged_exchange(session, {:error, error_code}) when is_atom(error_code) do
+    attrs =
+      token_exchange_attrs(session, false, error_code, %{
+        staged: true,
+        category: Atom.to_string(error_code)
+      })
+
+    changeset(%__MODULE__{}, attrs)
+  end
+
+  defp token_exchange_attrs(session, success, error_code, event_data) do
+    %{
       event_type: :token_exchange,
       tenant_id: session.tenant_id,
       provider_id: session.provider_id,
-      connection_id: connection && connection.id,
       session_id: hash_sensitive_data(session.session_token),
       success: success,
-      error_code: error,
+      error_code: error_code,
       occurred_at: DateTime.utc_now(),
-      event_data: %{
-        scopes_granted: connection && connection.granted_scopes,
-        token_expires_at: connection && connection.expires_at,
-        token_type: connection && connection.token_type,
-        session_duration_ms: calculate_session_duration(session)
-      }
+      event_data: Map.put(event_data, :session_duration_ms, calculate_session_duration(session))
     }
-
-    %__MODULE__{}
-    |> changeset(attrs)
   end
 
   @doc "Logs provider configuration changes"

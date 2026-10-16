@@ -35,8 +35,11 @@ defmodule Tango.API.Router do
 
   - `POST /sessions` - Create OAuth session
   - `GET /authorize/:session_token` - Get authorization URL
-  - `POST /exchange` - Exchange authorization code for connection
-  - `GET /callback` - OAuth callback page for popup flows
+  - `POST /exchange` - Exchange authorization code for a connection (legacy sessions only;
+    sessions created with `Tango.create_authorization_session/3` are rejected and never
+    return credentials)
+  - `GET /callback` - OAuth callback page for popup flows. Stages the code and posts only
+    the opaque completion handle to the session's exact completion origin
   - `GET /health` - Health check
 
   """
@@ -45,7 +48,6 @@ defmodule Tango.API.Router do
   require Logger
 
   alias Tango.Auth
-  alias Tango.Schemas.Connection
 
   plug(Tango.API.CORSPlug)
   plug(:match)
@@ -117,22 +119,13 @@ defmodule Tango.API.Router do
       # Load provider for response
       {:ok, provider} = Tango.get_provider_by_id(connection.provider_id)
 
-      # Include access token if requested for popup flows
+      # Credentials never leave the server through this endpoint
       response_data = %{
         provider: provider.name,
         status: connection.status,
         scopes: connection.granted_scopes,
         expires_at: connection.expires_at
       }
-
-      # Add access token for popup callback flows (when include_token=true)
-      response_data =
-        if params["include_token"] == "true" do
-          access_token = Connection.get_raw_access_token(connection)
-          Map.put(response_data, :access_token, access_token)
-        else
-          response_data
-        end
 
       conn
       |> put_resp_content_type("application/json")
@@ -142,22 +135,21 @@ defmodule Tango.API.Router do
     end
   end
 
-  # OAuth callback endpoint for popup flows
+  # OAuth callback endpoint for popup flows. Stages the code and posts only the
+  # opaque completion handle to the session's exact completion origin.
   get "/callback" do
-    code = Map.get(conn.query_params, "code")
-    state = Map.get(conn.query_params, "state")
-    error = Map.get(conn.query_params, "error")
-    error_description = Map.get(conn.query_params, "error_description")
+    html =
+      conn.query_params
+      |> Auth.process_popup_callback()
+      |> Auth.generate_callback_html()
 
-    if error, do: Auth.log_oauth_callback_error(state, error, error_description)
-
-    with exchange_result <- Auth.perform_callback_exchange(conn, code, state),
-         html <-
-           Auth.generate_callback_html(code, state, error, error_description, exchange_result) do
-      conn
-      |> put_resp_content_type("text/html")
-      |> send_resp(200, html)
-    end
+    conn
+    |> put_resp_header("content-security-policy", Auth.callback_content_security_policy())
+    |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("referrer-policy", "no-referrer")
+    |> put_resp_header("x-content-type-options", "nosniff")
+    |> put_resp_content_type("text/html")
+    |> send_resp(200, html)
   end
 
   # Health check endpoint
@@ -361,6 +353,15 @@ defmodule Tango.API.Router do
      }}
   end
 
+  defp format_error({:error, {:oauth_error, category}}) when is_atom(category) do
+    {400,
+     %{
+       error: "oauth_error",
+       category: Atom.to_string(category),
+       message: "The OAuth provider rejected the request"
+     }}
+  end
+
   defp format_error({:error, reason}) when is_atom(reason) do
     {400,
      %{
@@ -385,8 +386,9 @@ defmodule Tango.API.Router do
      }}
   end
 
-  defp format_error(error) do
-    Logger.error("Unhandled OAuth API error: #{inspect(error)}")
+  defp format_error(_error) do
+    # The error term is not logged: it may carry provider response bodies.
+    Logger.error("Unhandled OAuth API error")
 
     {500,
      %{

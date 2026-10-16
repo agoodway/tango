@@ -35,8 +35,7 @@ defmodule DemoWeb.TangoLogsComponent do
                   "w-2.5 h-2.5 rounded-full mt-1",
                   log.success && "bg-[#98c379]",
                   !log.success && "bg-[#e06c75]"
-                ]}>
-                </span>
+                ]}></span>
                 <div class="w-px flex-1 bg-[#333] mt-1"></div>
               </div>
               <div class="pb-1 min-w-0">
@@ -114,7 +113,9 @@ defmodule DemoWeb.TangoLogsComponent do
   defp event_label(:provider_created), do: "Provider Created"
   defp event_label(:provider_updated), do: "Provider Updated"
   defp event_label(:provider_deleted), do: "Provider Deleted"
-  defp event_label(type), do: type |> to_string() |> String.replace("_", " ") |> String.capitalize()
+
+  defp event_label(type),
+    do: type |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
   defp event_details(%{event_type: :oauth_start, event_data: data}) do
     parts =
@@ -131,7 +132,8 @@ defmodule DemoWeb.TangoLogsComponent do
   defp event_details(%{event_type: :token_exchange, event_data: data}) do
     parts =
       [
-        data["session_duration_ms"] && "Completed in #{(data["session_duration_ms"] / 1000) |> Float.round(1)}s",
+        data["session_duration_ms"] &&
+          "Completed in #{(data["session_duration_ms"] / 1000) |> Float.round(1)}s",
         data["token_type"] && "Token type: #{data["token_type"]}",
         data["scopes_granted"] && "Scopes: #{Enum.join(data["scopes_granted"], ", ")}",
         "Stored encrypted"

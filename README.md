@@ -1,68 +1,36 @@
-# 💃 Tango - OAuth Integrations Library
+# 💃 Tango
 
 [![Hex.pm](https://img.shields.io/hexpm/v/tango.svg)](https://hex.pm/packages/tango)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/tango)
 [![License](https://img.shields.io/hexpm/l/tango.svg)](https://github.com/agoodway/tango/blob/main/LICENSE)
 
-> Tango handles the OAuth dance between third-party services and your Phoenix application.
+> OAuth integrations for Phoenix — sessions, encrypted tokens, and multi-tenant connections.
 
-**Tango** is an Elixir OAuth integration library for Phoenix applications that provides drop-in OAuth support for third-party integrations. Inspired by [Nango](https://github.com/NangoHQ/nango) (previously [Pizzly](https://dev.to/bearer/introducing-pizzly-an-open-sourced-free-fast-simple-api-integrations-manager-4jog)) and compatible with Nango's provider configuration format, Tango leverages the extensive Nango [provider catalog](https://docs.nango.dev/integrations) while providing a library-first approach for Phoenix applications.
+Tango is an Elixir library for third-party OAuth in Phoenix apps. It is
+compatible with [Nango's provider catalog](https://docs.nango.dev/integrations)
+and stores tokens encrypted in Postgres via your host Ecto repo.
 
-## Key Features
+## Why Tango?
 
-- **Complete OAuth2 flows**: Session creation, authorization URL generation, code exchange, token refresh, and revocation
-- **Multi-tenant isolation**: Tenant-scoped queries for all connections with automatic session lifecycle management
-- **Security-first design**: AES-GCM encryption for tokens, PKCE implementation, and secure random token generation
-- **Comprehensive audit trail**: Structured logging for OAuth events, token operations, and system activities
+- **OAuth2 authorization code flow** with PKCE, CSRF state, and tenant isolation
+- **Encrypted tokens** (AES-GCM) plus structured audit logging
+- **Credential-free browser callback** (0.2.0) — completion handle only; verify and finalize on your server
+- **Optional LiveView component** and mountable OAuth API router
+- **Nango-compatible providers** from catalog or custom config (the catalog's OAuth2 authorization-code entries; see [PROVIDERS.md](docs/PROVIDERS.md#supported-catalog-entries))
 
-## Core Modules
+## Further reading
 
-```
-lib/tango/
-├── auth.ex                    # Main OAuth flow orchestrator
-├── provider.ex                # Provider configuration management
-├── connection.ex              # Token lifecycle and refresh
-├── vault.ex                   # AES-GCM encryption
-└── schemas/                   # Ecto schemas
-    ├── provider.ex            # OAuth provider configurations
-    ├── connection.ex          # Active OAuth connections
-    ├── oauth_session.ex       # Temporary OAuth sessions
-    └── audit_log.ex           # Security audit logging
-```
+- [SETUP.md](docs/SETUP.md) — config options, upgrades, non-Ecto installs
+- [PROVIDERS.md](docs/PROVIDERS.md) — catalog mix tasks and programmatic providers
+- [USAGE.md](docs/USAGE.md) — direct server-side OAuth and connection usage
+- [AUTHORIZATION.md](docs/AUTHORIZATION.md) — browser popup completion (0.2.0)
+- [API.md](docs/API.md) — mountable HTTP router and JavaScript examples
 
-## OAuth User Flow
+## Prerequisites
 
-Tango implements a complete OAuth2 Authorization Code Flow:
-
-```
-1. Provider Setup
-   ├─ Create provider from Nango catalog or custom config
-   ├─ Store OAuth endpoints and client credentials
-   └─ Encrypt client secrets with AES-GCM
-
-2. Session Creation
-   ├─ Create OAuth session with secure tokens
-   ├─ Generate PKCE parameters (64-byte verifier → SHA256 challenge)
-   └─ Store with 30-minute expiration and CSRF state
-
-3. Authorization URL Generation
-   ├─ Retrieve session and decrypt provider configuration
-   ├─ Build authorization URL with PKCE challenge
-   └─ Return URL for user redirect
-
-4. Token Exchange
-   ├─ Validate CSRF state and prevent cross-tenant attacks
-   ├─ Exchange authorization code for access tokens
-   ├─ Encrypt and store tokens with AES-GCM
-   └─ Create persistent connection with status tracking
-
-5. Connection Management
-   ├─ Automatic refresh with 5-minute expiration buffer
-   ├─ Exponential backoff with 3-attempt limits
-   └─ Batch operations for background refresh jobs
-```
-
-Each step includes comprehensive audit logging, multi-tenant isolation, and security validations.
+- Elixir 1.15+
+- PostgreSQL
+- An Ecto SQL repo
 
 ## Installation
 
@@ -71,391 +39,92 @@ Add `tango` to your dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:tango, "~> 0.1.3"}
+    {:tango, "~> 0.2.0"}
   ]
 end
 ```
 
-Install dependencies:
+Then fetch dependencies:
 
 ```bash
 mix deps.get
 ```
 
-## Configuration
+## Quick Start
 
-Configure Tango in your application:
+### 1. Configure
 
 ```elixir
 # config/config.exs
 config :tango,
   repo: MyApp.Repo,
-  schema_prefix: "tango", # Optional
   encryption_key: System.get_env("TANGO_ENCRYPTION_KEY"),
   api_key: System.get_env("TANGO_API_KEY")
 ```
 
-### Migrations
+Generate an encryption key:
 
-`mix tango.setup` writes a wrapper migration to `priv/repo/migrations/`; `mix ecto.migrate` applies it.
+```bash
+openssl rand -base64 32
+```
+
+### 2. Install the schema
+
+`mix tango.setup` writes a host-owned wrapper migration; `mix ecto.migrate`
+applies it. Use setup for the **initial install only** — upgrades need a
+separate pinned migration (see [SETUP.md](docs/SETUP.md)).
 
 ```bash
 mix tango.setup
 mix ecto.migrate
 ```
 
-`mix tango.setup` is for the **initial install only** — its generated `down`
-calls `Tango.Migration.down()`, which targets version 0 and drops every Tango
-table. Never rerun it to pick up a new schema version.
-
-#### Upgrading an existing install
-
-When a Tango release ships a new schema version (see `CHANGELOG`/release
-notes), write a fresh migration in your application pinning the version range
-explicitly, so rolling it back returns to the previous version instead of
-dropping the schema:
-
-```elixir
-defmodule MyApp.Repo.Migrations.UpgradeTangoV2 do
-  use Ecto.Migration
-
-  def up, do: Tango.Migration.up(version: 2)
-  def down, do: Tango.Migration.down(version: 1)
-end
-```
-
-Not using Ecto migrations? Copy the SQL from `priv/repo/sql/versions/<version>/`
-into your migration tool of choice (replace the `$SCHEMA$` placeholder with
-`"public"` or your custom prefix), and stamp the version marker EctoEvolver
-would have written, so `Tango.Migration.migrated_version/1` agrees with the
-physical schema:
-
-```sql
-COMMENT ON TABLE "$SCHEMA$".tango_providers IS 'Tango version=2';
-```
-
-## OAuth Providers
-
-Providers are sourced from the [Nango catalog](https://docs.nango.dev/integrations/overview) with pre-configured OAuth endpoints and settings.
-
-### Mix Tasks
-
-Use mix tasks for provider management with built-in validation and error handling:
+### 3. Create a provider
 
 ```bash
-# Show provider details from catalog
-mix tango.providers.show github
-
-# Create OAuth2 provider with single scope
-mix tango.providers.create github --client-id=your_client_id --client-secret=your_secret
-
-# Create OAuth2 provider with multiple scopes (individual --scope flags)
-mix tango.providers.create microsoft \
-  --client-id="your_azure_client_id" \
-  --client-secret="your_azure_client_secret" \
-  --scope="Calendars.Read" \
-  --scope="Calendars.ReadWrite" \
-  --scope="User.Read" \
-  --scope="offline_access"
-
-# Create OAuth2 provider with comma-separated scopes
-mix tango.providers.create google \
-  --client-id="your_google_client_id" \
-  --client-secret="your_google_client_secret" \
-  --scopes="https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/userinfo.email"
-
-# Create API key provider
-mix tango.providers.create stripe --api-key=sk_live_xxx
-
-# Sync all providers from catalog to database
-mix tango.providers.sync
+mix tango.providers.create github \
+  --client-id=your_client_id \
+  --client-secret=your_client_secret
 ```
 
-### Programmatic Creation
-
-For dynamic provider creation in your application code:
+### 4. Run a direct OAuth flow
 
 ```elixir
-# OAuth2 provider using catalog configuration
-{:ok, nango_config} = Tango.Catalog.get_provider("github")
+tenant_id = "user-123"
+redirect_uri = "https://yourapp.com/auth/callback"
 
-client_id = "your_github_client_id"
+{:ok, session} =
+  Tango.create_session("github", tenant_id,
+    redirect_uri: redirect_uri,
+    scopes: ["user:email", "repo"]
+  )
 
-{:ok, provider} = Tango.create_provider(%{
-  name: nango_config["display_name"] || "GitHub",
-  slug: "github",
-  client_secret: "your_github_client_secret",
-  config: Map.merge(nango_config, %{
-    "client_id" => client_id
-  }),
-  default_scopes: ["user:email", "repo"],
-  active: true,
-  metadata: nango_config["metadata"] || %{}
-})
+{:ok, auth_url} =
+  Tango.authorize_url(session.session_token, redirect_uri: redirect_uri)
 
-# Custom provider without catalog
-{:ok, provider} = Tango.create_provider(%{
-  name: "Custom API",
-  slug: "custom_api",
-  client_secret: "your_client_secret",
-  config: %{
-    "client_id" => "your_client_id",
-    "auth_url" => "https://api.example.com/oauth/authorize",
-    "token_url" => "https://api.example.com/oauth/token",
-    "auth_mode" => "OAUTH2"
-  },
-  default_scopes: ["read", "write"],
-  active: true
-})
+# Redirect the user to auth_url. After the provider returns state + code:
 
-# API key provider
-{:ok, provider} = Tango.create_provider(%{
-  name: "Custom API Key Service",
-  slug: "custom_service",
-  config: %{
-    "auth_mode" => "API_KEY",
-    "api_config" => %{
-      "headers" => %{
-        "authorization" => "Bearer ${api_key}"
-      }
-    }
-  },
-  api_key: "your_api_key",
-  active: true
-})
-```
+{:ok, connection} =
+  Tango.exchange_code(state, code, tenant_id, redirect_uri: redirect_uri)
 
-## Quick Start
-
-### 1. Set up OAuth Provider
-
-```bash
-# Create OAuth2 provider using mix task (recommended)
-mix tango.providers.create github --client-id=your_client_id --client-secret=your_secret
-
-# Create API key provider
-mix tango.providers.create stripe --api-key=sk_live_xxx
-```
-
-```elixir
-# Or programmatically using catalog configuration
-{:ok, nango_config} = Tango.Catalog.get_provider("github")
-
-{:ok, provider} = Tango.create_provider(%{
-  name: nango_config["display_name"] || "GitHub",
-  slug: "github",
-  client_secret: "your_client_secret",
-  config: Map.merge(nango_config, %{
-    "client_id" => "your_client_id"
-  }),
-  default_scopes: ["user:email", "repo"],
-  active: true,
-  metadata: nango_config["metadata"] || %{}
-})
-```
-
-### 2. OAuth Flow Implementation
-
-```elixir
-# Start OAuth session
-{:ok, session} = Tango.create_session("github", tenant_id,
-  redirect_uri: "https://yourapp.com/auth/callback",
-  scopes: ["user:email", "repo"]
-)
-
-# Generate authorization URL
-{:ok, auth_url} = Tango.authorize_url(session.session_token,
-  redirect_uri: "https://yourapp.com/auth/callback"
-)
-# Redirect user to auth_url
-
-# Handle callback - exchange code for tokens
-{:ok, connection} = Tango.exchange_code(state, authorization_code,
-  redirect_uri: "https://yourapp.com/auth/callback"
-)
-```
-
-### 3. Use OAuth Connection
-
-```elixir
-# Get active connection for API calls
 {:ok, connection} = Tango.get_connection_for_provider("github", tenant_id)
-
-# Use connection.access_token in your API requests
 headers = [{"Authorization", "Bearer #{connection.access_token}"}]
-
-# Mark connection as used (updates last_used_at)
-Tango.mark_connection_used(connection)
-
-# Report what the provider said, so revoked credentials can be retired.
-# Three consecutive rejections (tune per provider with :max_failures — the
-# count is rejections, not elapsed time, so match it to your call cadence)
-# expire the connection, and get_connection_for_provider/2 stops serving it.
-#
-# Report a 401, which means the credentials themselves were rejected. Do NOT
-# blanket-report 403: providers use it for insufficient scope, resource
-# policy, and quota, and three of those in a row would expire a healthy
-# connection — classify a 403 from its provider-specific error body first.
-case call_the_provider(connection) do
-  {:ok, result} ->
-    Tango.record_auth_success(connection)
-    {:ok, result}
-
-  {:error, {:http_error, 401, _body}} ->
-    Tango.record_auth_failure(connection, "http_401", max_failures: 3)
-    {:error, :unauthorized}
-end
 ```
 
-## Ready-to-Use OAuth API
-
-Tango includes a complete OAuth API router that can be mounted in Phoenix applications with a single line.
-
-### Setup
-
-1. Configure API key in your application:
-
-```elixir
-# config/config.exs  
-config :tango,
-  encryption_key: System.get_env("TANGO_ENCRYPTION_KEY"),
-  api_key: System.get_env("TANGO_API_KEY")
-```
-
-2. Add the API router to your Phoenix router:
-
-```elixir
-# router.ex
-defmodule MyAppWeb.Router do
-  use MyAppWeb, :router
-
-  scope "/api/oauth" do
-    pipe_through :api
-    forward "/", Tango.API.Router
-  end
-end
-```
-
-### Available Endpoints
-
-The mounted API provides these endpoints:
-
-- `POST /api/oauth/sessions` - Create OAuth session
-- `GET /api/oauth/authorize/:session_token` - Get authorization URL  
-- `POST /api/oauth/exchange` - Exchange authorization code for connection
-- `GET /api/oauth/health` - Health check
-
-### JavaScript Usage
-
-```javascript
-const API_BASE = '/api/oauth';
-const TENANT_ID = 'user-123';
-const API_KEY = 'your-secret-api-key';
-
-// Start OAuth flow
-async function startOAuth(provider, redirectUri, scopes = []) {
-  // Create session
-  const session = await fetch(`${API_BASE}/sessions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Tenant-ID': TENANT_ID,
-      'Authorization': `Bearer ${API_KEY}`
-    },
-    body: JSON.stringify({ provider, redirect_uri: redirectUri, scopes })
-  }).then(r => r.json());
-
-  // Get authorization URL
-  const authUrl = await fetch(
-    `${API_BASE}/authorize/${session.session_token}?redirect_uri=${redirectUri}&scopes=${scopes.join(' ')}`,
-    { 
-      headers: { 
-        'X-Tenant-ID': TENANT_ID,
-        'Authorization': `Bearer ${API_KEY}`
-      } 
-    }
-  ).then(r => r.json());
-
-  // Redirect to OAuth provider
-  window.location.href = authUrl.authorization_url;
-}
-
-// Handle OAuth callback
-async function handleCallback() {
-  const params = new URLSearchParams(window.location.search);
-  const state = params.get('state');
-  const code = params.get('code');
-  
-  if (state && code) {
-    const connection = await fetch(`${API_BASE}/exchange`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-ID': TENANT_ID,
-        'Authorization': `Bearer ${API_KEY}`
-      },
-      body: JSON.stringify({
-        state,
-        code,
-        redirect_uri: window.location.origin + '/callback'
-      })
-    }).then(r => r.json());
-
-    console.log('OAuth connection established:', connection);
-  }
-}
-```
-
-### Connection Management
-
-Use Tango's programmatic API in your Phoenix application to manage connections:
-
-```elixir
-# List connections for a user
-connections = Tango.list_connections(user_id)
-
-# Get connection for API calls
-{:ok, connection} = Tango.get_connection_for_provider("github", user_id)
-headers = [{"Authorization", "Bearer #{connection.access_token}"}]
-
-# With auto-refresh, an expired token that cannot be refreshed returns
-# {:error, {:refresh_failed, reason}}.
-{:ok, connection} = Tango.get_connection_for_provider("github", user_id, auto_refresh: true)
-
-# Revoke connection
-{:ok, _revoked} = Tango.revoke_connection(connection, user_id)
-```
+For browser popups (credential-free completion handle), see
+[AUTHORIZATION.md](docs/AUTHORIZATION.md). More connection helpers:
+[USAGE.md](docs/USAGE.md). Mount the HTTP API: [API.md](docs/API.md).
 
 ## Testing
 
-**Requirements**: PostgreSQL running locally with `postgres:postgres` credentials.
+Requires local PostgreSQL with `postgres:postgres` credentials.
 
 ```bash
-# Run all tests
 mix test
-
-# Run with coverage report
 mix coveralls
-
-# Generate HTML coverage report
-mix coveralls.html
-
-# Run quality checks (format, credo, tests)
 mix quality
 ```
 
-## Planned Features
+## License
 
-- **TypeScript client library**: Client SDK for web or OAuth flows
-- **Phoenix LiveView components**: Pre-built UI component for OAuth flows
-- **Token Refresh Automation**: Background job integration with automatic token refresh scheduling
-- **Rate Limiting**: Built-in OAuth endpoint protection and request throttling
-- **OAuth1 Support**: Legacy OAuth support for older providers
-
-## Documentation
-
-Documentation is available on [HexDocs](https://hexdocs.pm/tango) or generate locally:
-
-```bash
-mix docs
-```
+See [LICENSE](LICENSE).

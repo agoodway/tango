@@ -65,6 +65,32 @@ defmodule Tango.Connection do
   end
 
   @doc """
+  Gets an active tenant-owned connection with optional token refresh.
+
+  Without `auto_refresh: true` this is a plain tenant- and status-filtered read
+  of the last committed row, so it never waits behind an in-flight refresh.
+  With it, the tenant and active status are checked while holding the same row
+  lock used for refresh, so callers cannot receive a connection that changes
+  state between lookup and refresh.
+  """
+  def get_active_connection(connection_id, tenant_id, opts \\ [])
+      when is_integer(connection_id) and is_binary(tenant_id) and is_list(opts) do
+    if Keyword.get(opts, :auto_refresh, false) do
+      connection_id
+      |> locked_refresh(:expiry, tenant_id)
+      |> refresh_outcome()
+    else
+      fetch_active_connection(connection_id, tenant_id)
+    end
+  end
+
+  defp fetch_active_connection(connection_id, tenant_id) do
+    connection_id
+    |> active_connection_query(tenant_id)
+    |> one_or_not_found()
+  end
+
+  @doc """
   Gets an active connection for provider and tenant.
 
   Provider is identified by slug, not name.
@@ -137,19 +163,17 @@ defmodule Tango.Connection do
   @spec refresh_if_needed(Connection.t()) ::
           {:ok, Connection.t()} | {:error, {:refresh_failed, term()}} | {:error, :not_found}
   def refresh_if_needed(%Connection{id: id}) do
-    case locked_refresh(id) do
-      {:current, connection} -> {:ok, connection}
-      {:refreshed, connection} -> {:ok, connection}
-      {:failed, reason, connection} -> serve_unless_expired(reason, connection)
-      {:error, _reason} = error -> error
-    end
+    id
+    |> locked_refresh()
+    |> refresh_outcome()
   end
 
-  defp locked_refresh(id) do
+  defp locked_refresh(id, mode \\ :expiry, tenant_id \\ nil) do
     fn ->
-      case lock_active_connection(id) do
-        {:ok, locked} -> refresh_locked(locked)
-        {:error, :not_found} = not_found -> not_found
+      with {:ok, routing} <- load_connection_routing(id, tenant_id),
+           :ok <- Tango.ConnectionLock.lock(repo(), routing.provider_id, routing.tenant_id),
+           {:ok, locked} <- lock_active_connection(id, tenant_id) do
+        refresh_locked(locked, mode)
       end
     end
     |> repo().transaction()
@@ -159,20 +183,48 @@ defmodule Tango.Connection do
     end
   end
 
-  defp lock_active_connection(id) do
-    from(c in Connection,
-      where: c.id == ^id and c.status == :active,
-      lock: "FOR UPDATE",
-      preload: [:provider]
-    )
+  defp load_connection_routing(id, tenant_id) do
+    Connection
+    |> where([c], c.id == ^id)
+    |> maybe_filter_by_tenant(tenant_id)
+    |> select([c], %{provider_id: c.provider_id, tenant_id: c.tenant_id})
     |> repo().one()
     |> case do
+      nil -> {:error, :not_found}
+      routing -> {:ok, routing}
+    end
+  end
+
+  defp lock_active_connection(id, tenant_id) do
+    id
+    |> active_connection_query(tenant_id)
+    |> lock("FOR UPDATE")
+    |> one_or_not_found()
+  end
+
+  defp active_connection_query(id, tenant_id) do
+    Connection
+    |> where([c], c.id == ^id and c.status == :active)
+    |> maybe_filter_by_tenant(tenant_id)
+    |> preload([:provider])
+  end
+
+  defp one_or_not_found(query) do
+    case repo().one(query) do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}
     end
   end
 
-  defp refresh_locked(connection) do
+  defp maybe_filter_by_tenant(query, nil), do: query
+
+  defp maybe_filter_by_tenant(query, tenant_id) do
+    from(c in query,
+      where: c.tenant_id == ^tenant_id
+    )
+  end
+
+  defp refresh_locked(connection, :expiry) do
     case {Connection.needs_refresh?(connection), Connection.can_refresh?(connection)} do
       {false, _can_refresh} -> {:current, connection}
       {true, false} -> {:failed, :refresh_not_allowed, connection}
@@ -180,10 +232,32 @@ defmodule Tango.Connection do
     end
   end
 
+  defp refresh_locked(connection, {:force, snapshot}) do
+    if refresh_generation_changed?(snapshot, connection) do
+      {:current, connection}
+    else
+      attempt_refresh(connection)
+    end
+  end
+
+  defp refresh_generation_changed?(snapshot, current) do
+    snapshot.lock_version != current.lock_version and
+      {snapshot.access_token, snapshot.refresh_token, snapshot.expires_at} !=
+        {current.access_token, current.refresh_token, current.expires_at}
+  end
+
+  defp refresh_outcome({:current, connection}), do: {:ok, connection}
+  defp refresh_outcome({:refreshed, connection}), do: {:ok, connection}
+
+  defp refresh_outcome({:failed, reason, connection}),
+    do: serve_unless_expired(reason, connection)
+
+  defp refresh_outcome({:error, _reason} = error), do: error
+
   defp attempt_refresh(connection) do
-    case refresh_connection(connection) do
+    case refresh_connection_locked(connection) do
       {:ok, refreshed} -> {:refreshed, refreshed}
-      {:error, reason} -> {:failed, reason, connection}
+      {:error, reason} -> {:failed, reason, record_refresh_failure_locked(connection, reason)}
     end
   end
 
@@ -279,7 +353,10 @@ defmodule Tango.Connection do
   defp do_record_auth_failure(connection_id, tenant_id, error_reason, opts) do
     Ecto.Multi.new()
     |> Ecto.Multi.run(:load, fn repo, _changes ->
-      lock_active_connection(repo, connection_id, tenant_id)
+      with {:ok, routing} <- load_connection_routing(repo, connection_id, tenant_id),
+           :ok <- Tango.ConnectionLock.lock(repo, routing.provider_id, routing.tenant_id) do
+        lock_active_connection(repo, connection_id, tenant_id)
+      end
     end)
     |> Ecto.Multi.update(:connection, fn %{load: connection} ->
       Connection.record_auth_failure(connection, error_reason, opts)
@@ -374,6 +451,19 @@ defmodule Tango.Connection do
     end
   end
 
+  defp load_connection_routing(repo, connection_id, tenant_id) do
+    from(c in Connection,
+      where: c.id == ^connection_id,
+      where: c.tenant_id == ^tenant_id,
+      select: %{provider_id: c.provider_id, tenant_id: c.tenant_id}
+    )
+    |> repo.one()
+    |> case do
+      nil -> {:error, :not_found}
+      routing -> {:ok, routing}
+    end
+  end
+
   @doc """
   Refreshes an OAuth connection's access token.
 
@@ -390,45 +480,69 @@ defmodule Tango.Connection do
 
   """
   def refresh_connection(%Connection{} = connection) do
+    case locked_refresh(connection.id, {:force, connection}) do
+      # Unlike refresh_if_needed/1, an explicit refresh reports the provider's
+      # failure even while the current access token is still valid.
+      {:failed, reason, _connection} -> {:error, reason}
+      outcome -> refresh_outcome(outcome)
+    end
+  end
+
+  defp refresh_connection_locked(connection) do
     with :ok <- validate_refresh_eligibility(connection),
          {:ok, provider} <- get_connection_provider_cached(connection),
          {:ok, oauth_config} <- Provider.get_oauth_credentials(provider),
-         {:ok, token_response} <- perform_token_refresh(oauth_config, connection) do
-      try do
-        Ecto.Multi.new()
-        |> Ecto.Multi.update(
-          :connection,
-          Connection.refresh_changeset(connection, token_response)
-        )
-        |> Ecto.Multi.run(:audit_log, fn repo, %{connection: updated_connection} ->
-          AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
-          |> repo.insert()
-        end)
-        |> repo().transaction()
-        |> case do
-          {:ok, %{connection: updated_connection}} -> {:ok, updated_connection}
-          {:error, _op, reason, _changes} -> {:error, reason}
-        end
-      rescue
-        _e in [Ecto.StaleEntryError] -> {:error, :concurrent_refresh}
-      end
-    else
-      {:error, reason} = error ->
-        Ecto.Multi.new()
-        |> Ecto.Multi.run(:failure, fn _repo, _changes ->
-          record_refresh_failure(connection, reason)
-        end)
-        |> Ecto.Multi.run(:audit_log, fn repo, %{failure: failed_connection} ->
+         {:ok, token_response} <- perform_token_refresh(oauth_config, provider, connection),
+         {:ok, updated_connection} <-
+           Tango.RedactedParams.update(
+             repo(),
+             Connection.refresh_changeset(connection, token_response)
+           ) do
+      insert_refresh_audit(
+        AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
+      )
+
+      {:ok, updated_connection}
+    end
+  end
+
+  defp record_refresh_failure_locked(connection, reason) do
+    case record_refresh_failure(connection, reason) do
+      {:ok, failed_connection} ->
+        insert_refresh_audit(
           AuditLog.log_connection_event(:token_refresh_failed, failed_connection, false, %{
             reason: reason,
             attempts: failed_connection.refresh_attempts
           })
-          |> repo.insert()
-        end)
-        |> repo().transaction()
+        )
 
-        error
+        failed_connection
+
+      {:error, _update_reason} ->
+        connection
     end
+  end
+
+  # Refresh audit rows are best-effort. Once the provider has rotated the tokens
+  # they must be stored, or the connection is stranded with a spent refresh token,
+  # so an audit failure is logged rather than reported as a refresh failure. The
+  # savepoint keeps a database-level failure from aborting the refresh transaction.
+  defp insert_refresh_audit(changeset) do
+    case repo().insert(changeset, mode: :savepoint) do
+      {:ok, _audit_log} -> :ok
+      {:error, _changeset} -> log_refresh_audit_failure(changeset, :invalid)
+    end
+  rescue
+    error in Postgrex.Error -> log_refresh_audit_failure(changeset, error.postgres[:code])
+  end
+
+  defp log_refresh_audit_failure(changeset, reason) do
+    Logger.error(
+      "Tango could not write #{Ecto.Changeset.get_field(changeset, :event_type)} " <>
+        "audit log: #{inspect(reason)}"
+    )
+
+    :error
   end
 
   @doc """
@@ -499,7 +613,15 @@ defmodule Tango.Connection do
   """
   def revoke_connection(%Connection{tenant_id: tenant_id} = connection, tenant_id) do
     Ecto.Multi.new()
-    |> Ecto.Multi.update(:connection, Connection.changeset(connection, %{status: "revoked"}))
+    |> Ecto.Multi.run(:locked_connection, fn repo, _changes ->
+      with {:ok, routing} <- load_connection_routing(repo, connection.id, tenant_id),
+           :ok <- Tango.ConnectionLock.lock(repo, routing.provider_id, routing.tenant_id) do
+        lock_revokeable_connection(repo, connection.id, tenant_id)
+      end
+    end)
+    |> Ecto.Multi.update(:connection, fn %{locked_connection: locked} ->
+      Connection.changeset(locked, %{status: :revoked})
+    end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{connection: revoked_connection} ->
       AuditLog.log_connection_event(:connection_revoked, revoked_connection, true)
       |> repo.insert()
@@ -515,6 +637,20 @@ defmodule Tango.Connection do
     {:error, :not_authorized}
   end
 
+  defp lock_revokeable_connection(repo, connection_id, tenant_id) do
+    from(c in Connection,
+      where: c.id == ^connection_id,
+      where: c.tenant_id == ^tenant_id,
+      where: c.status in [:active, :expired],
+      lock: "FOR UPDATE"
+    )
+    |> repo.one()
+    |> case do
+      nil -> {:error, :not_found}
+      connection -> {:ok, connection}
+    end
+  end
+
   @doc """
   Revokes all connections for a tenant.
 
@@ -527,14 +663,7 @@ defmodule Tango.Connection do
   def revoke_tenant_connections(tenant_id) when is_binary(tenant_id) do
     Ecto.Multi.new()
     |> Ecto.Multi.run(:revoke, fn repo, _changes ->
-      {count, _} =
-        from(c in Connection,
-          where: c.tenant_id == ^tenant_id,
-          where: c.status == :active
-        )
-        |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
-
-      {:ok, count}
+      revoke_locked_generations(repo, where(Connection, [c], c.tenant_id == ^tenant_id))
     end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{revoke: count} ->
       if count > 0 do
@@ -574,14 +703,7 @@ defmodule Tango.Connection do
   defp do_revoke_provider_connections(provider, provider_name) do
     Ecto.Multi.new()
     |> Ecto.Multi.run(:revoke, fn repo, _changes ->
-      {count, _} =
-        from(c in Connection,
-          where: c.provider_id == ^provider.id,
-          where: c.status == :active
-        )
-        |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
-
-      {:ok, count}
+      revoke_locked_generations(repo, where(Connection, [c], c.provider_id == ^provider.id))
     end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{revoke: count} ->
       if count > 0 do
@@ -708,10 +830,9 @@ defmodule Tango.Connection do
     end
   end
 
-  defp perform_token_refresh(oauth_config, connection) do
+  defp perform_token_refresh(oauth_config, provider, connection) do
     oauth_config
-    |> build_refresh_client(connection.refresh_token)
-    |> OAuth2.Client.get_token()
+    |> Tango.TokenRequest.refresh(provider.metadata, connection.refresh_token)
     |> case do
       {:ok, %{token: token}} ->
         {:ok, convert_token_to_response(token, connection)}
@@ -730,25 +851,17 @@ defmodule Tango.Connection do
   defp oauth_error_code(%{"error" => code}) when is_binary(code), do: code
   defp oauth_error_code(_body), do: "unknown"
 
-  defp build_refresh_client(oauth_config, refresh_token) do
-    OAuth2.Client.new(
-      strategy: OAuth2.Strategy.Refresh,
-      client_id: oauth_config.client_id,
-      client_secret: oauth_config.client_secret,
-      token_url: oauth_config.token_url,
-      serializers: %{"application/json" => Jason},
-      params: %{"refresh_token" => refresh_token}
-    )
-  end
-
   defp convert_token_to_response(%OAuth2.AccessToken{} = token, connection) do
-    %{
+    response = %{
       "access_token" => token.access_token,
       "refresh_token" => token.refresh_token || connection.refresh_token,
       "token_type" => token.token_type,
-      "expires_in" => calculate_expires_in(token.expires_at),
-      "scope" => token.other_params["scope"]
+      "expires_in" => calculate_expires_in(token.expires_at)
     }
+
+    if Map.has_key?(token.other_params, "scope"),
+      do: Map.put(response, "scope", token.other_params["scope"]),
+      else: response
   end
 
   defp record_refresh_failure(connection, reason) do
@@ -757,14 +870,57 @@ defmodule Tango.Connection do
     |> repo().update()
   end
 
-  defp calculate_expires_in(expires_at) do
+  defp calculate_expires_in(expires_at) when is_integer(expires_at) do
     expires_at
     |> DateTime.from_unix!()
     |> DateTime.diff(DateTime.utc_now())
   end
 
+  defp calculate_expires_in(_expires_at), do: nil
+
   defp cleanup_cutoff_date do
     DateTime.add(DateTime.utc_now(), -30 * 24 * 60 * 60, :second)
+  end
+
+  # Revokes the active and expired connections in `scope` while holding the
+  # generation lock of every (provider, tenant) pair it touches.
+  defp revoke_locked_generations(repo, scope) do
+    revokeable = where(scope, [c], c.status in [:active, :expired])
+    locked_keys = lock_active_generation_keys(repo, revokeable)
+
+    {count, _} =
+      revokeable
+      |> restrict_to_generation_keys(locked_keys)
+      |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
+
+    {:ok, count}
+  end
+
+  defp lock_active_generation_keys(repo, query) do
+    keys =
+      query
+      |> select([c], {c.provider_id, c.tenant_id})
+      |> distinct(true)
+      |> order_by([c], asc: c.provider_id, asc: c.tenant_id)
+      |> repo.all()
+
+    Enum.each(keys, fn {provider_id, tenant_id} ->
+      :ok = Tango.ConnectionLock.lock(repo, provider_id, tenant_id)
+    end)
+
+    keys
+  end
+
+  defp restrict_to_generation_keys(query, keys) do
+    predicate =
+      Enum.reduce(keys, dynamic(false), fn {provider_id, tenant_id}, predicate ->
+        dynamic(
+          [c],
+          ^predicate or (c.provider_id == ^provider_id and c.tenant_id == ^tenant_id)
+        )
+      end)
+
+    where(query, ^predicate)
   end
 
   defp refresh_buffer_time do

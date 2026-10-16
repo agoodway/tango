@@ -95,6 +95,47 @@ defmodule Tango.ConnectionRefreshLockTest do
     assert Agent.get(requests, & &1) == 1
   end
 
+  test "public refresh waits for and reuses an expiring-connection sweep refresh",
+       %{conn: conn, requests: requests} do
+    assert [conn.id] == Sandbox.unboxed_run(Repo, fn -> expiring_connection_ids() end),
+           "committed expiring connections from an aborted run remain; delete them first"
+
+    {sweep, sweep_pid} = start_caller(fn -> Tango.Connection.refresh_expiring_connections() end)
+    assert_receive {:token_request, handler}, 5_000
+
+    {refresh, refresh_pid} =
+      start_caller(fn -> Tango.Connection.refresh_connection(conn) end)
+
+    await_blocked(refresh_pid, sweep_pid)
+    send(handler, :release)
+
+    assert {:ok, 1} = Task.await(sweep)
+    assert {:ok, %{access_token: "fresh_access_token"} = refreshed} = Task.await(refresh)
+
+    persisted =
+      Sandbox.unboxed_run(Repo, fn -> Repo.get!(ConnectionSchema, conn.id) end)
+
+    assert refreshed.access_token == persisted.access_token
+    assert Agent.get(requests, & &1) == 1
+  end
+
+  test "reading the current connection does not wait behind an in-flight refresh",
+       %{conn: conn, requests: requests} do
+    {refresh, _refresh_pid} = start_caller(fn -> Tango.Connection.refresh_if_needed(conn) end)
+    assert_receive {:token_request, handler}, 5_000
+
+    {read, _read_pid} =
+      start_caller(fn -> Tango.get_active_connection(conn.id, conn.tenant_id) end)
+
+    assert {:ok, current} = Task.await(read, 1_000)
+    assert current.id == conn.id
+    assert current.access_token == conn.access_token
+
+    send(handler, :release)
+    assert {:ok, %{access_token: "fresh_access_token"}} = Task.await(refresh)
+    assert Agent.get(requests, & &1) == 1
+  end
+
   defp expiring_connection_ids do
     Repo.all(
       from(c in ConnectionSchema,

@@ -115,8 +115,8 @@ defmodule Mix.Tasks.Helpers.ProviderHelperValidationTest do
 
       assert output =~ "For OAuth2 providers:"
       assert output =~ "mix tango.providers.create github --client-id=xxx --client-secret=yyy"
-      assert output =~ "For API key providers:"
-      assert output =~ "mix tango.providers.create github --api-key=xxx"
+      assert output =~ "API key providers are not supported"
+      refute output =~ "--api-key"
     end
 
     test "display_general_usage/0 shows general usage information" do
@@ -128,7 +128,7 @@ defmodule Mix.Tasks.Helpers.ProviderHelperValidationTest do
       assert output =~ "Usage:"
       assert output =~ "Examples:"
       assert output =~ "mix tango.providers.create github --client-id=xxx --client-secret=yyy"
-      assert output =~ "mix tango.providers.create stripe --api-key=sk_live_xxx"
+      refute output =~ "--api-key"
     end
   end
 

@@ -35,14 +35,34 @@ defmodule Tango.Auth do
   @spec create_session(String.t(), String.t(), keyword()) :: session_result()
   def create_session(provider_name, tenant_id, opts \\ [])
       when is_binary(provider_name) and is_binary(tenant_id) do
+    create_session_transaction(provider_name, tenant_id, opts, :legacy)
+  end
+
+  @doc """
+  Creates an authorization session whose scopes, redirect, completion origin,
+  and provider parameters are bound at creation.
+  """
+  @spec create_authorization_session(String.t(), String.t(), keyword()) :: session_result()
+  def create_authorization_session(provider_name, tenant_id, opts)
+      when is_binary(provider_name) and is_binary(tenant_id) and is_list(opts) do
+    create_session_transaction(provider_name, tenant_id, opts, :authorization)
+  end
+
+  defp create_session_transaction(provider_name, tenant_id, opts, mode) do
     # Use Ecto.Multi for atomic session creation and audit logging
     Ecto.Multi.new()
-    |> Ecto.Multi.run(:validate, fn _repo, _changes ->
+    |> Ecto.Multi.run(:validate, fn repo, _changes ->
       with :ok <- Tango.Validation.validate_provider_slug(provider_name),
            :ok <- Tango.Validation.validate_tenant_id(tenant_id),
-           {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
-           {:ok, provider} <- Tango.Provider.get_provider(provider_name) do
-        changeset = OAuthSession.create_session(provider.id, tenant_id, validated_opts)
+           {:ok, provider} <- Tango.Provider.get_provider(provider_name),
+           {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
+           {:ok, validated_opts} <-
+             validate_session_options(repo, provider, tenant_id, opts, mode) do
+        session_opts =
+          validated_opts
+          |> Keyword.put(:oauth_client_id, oauth_config.client_id)
+
+        changeset = OAuthSession.create_session(provider.id, tenant_id, session_opts)
         {:ok, %{provider: provider, changeset: changeset}}
       else
         {:error, :not_found} -> {:error, :provider_not_found}
@@ -67,6 +87,121 @@ defmodule Tango.Auth do
     end
   end
 
+  defp validate_session_options(_repo, _provider, _tenant_id, opts, :legacy) do
+    with {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts) do
+      # Keep empty scopes unbound so authorize_url/2 can still supply them (0.1.x).
+      scopes = validated_opts[:scopes] || []
+      {:ok, Keyword.put(validated_opts, :scopes, scopes)}
+    end
+  end
+
+  defp validate_session_options(repo, provider, tenant_id, opts, :authorization) do
+    scopes = Keyword.get(opts, :scopes, provider.default_scopes)
+    redirect_uri = Keyword.get(opts, :redirect_uri)
+    completion_origin = Keyword.get(opts, :completion_origin)
+    intent_reference = Keyword.get(opts, :intent_reference)
+    expires_at = Keyword.get(opts, :expires_at)
+    auth_params = Keyword.get(opts, :auth_params, %{})
+
+    with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
+         :ok <- Tango.Validation.validate_scopes(scopes),
+         :ok <- Tango.Validation.validate_completion_origin(completion_origin),
+         :ok <- validate_intent_reference(intent_reference),
+         :ok <- validate_expiration(expires_at),
+         {:ok, auth_params} <- Tango.Validation.validate_auth_params(auth_params),
+         {:ok, expected} <-
+           validate_expected_connection(
+             repo,
+             provider,
+             tenant_id,
+             Keyword.get(opts, :expected_connection_id),
+             Keyword.get(opts, :expected_subject)
+           ) do
+      {:ok,
+       [
+         scopes: scopes,
+         redirect_uri: redirect_uri,
+         completion_origin: completion_origin,
+         intent_reference: intent_reference,
+         expires_at: expires_at,
+         auth_params: auth_params,
+         expected_connection_id: expected.id,
+         expected_subject: expected.subject
+       ]}
+    end
+  end
+
+  defp validate_intent_reference(reference)
+       when is_binary(reference) and byte_size(reference) > 0 and byte_size(reference) <= 255,
+       do: :ok
+
+  defp validate_intent_reference(_), do: {:error, :invalid_intent_reference}
+
+  defp validate_expiration(nil), do: :ok
+
+  defp validate_expiration(%DateTime{} = expires_at) do
+    now = DateTime.utc_now()
+    session_timeout = Application.get_env(:tango, :session_timeout, 30 * 60)
+    maximum = DateTime.add(now, session_timeout, :second)
+
+    if DateTime.compare(expires_at, now) == :gt and
+         DateTime.compare(expires_at, maximum) in [:lt, :eq] do
+      :ok
+    else
+      {:error, :invalid_expiration}
+    end
+  end
+
+  defp validate_expiration(_), do: {:error, :invalid_expiration}
+
+  defp validate_expected_connection(_repo, _provider, _tenant_id, nil, nil),
+    do: {:ok, %{id: nil, subject: nil}}
+
+  defp validate_expected_connection(_repo, _provider, _tenant_id, nil, _subject),
+    do: {:error, :stale_connection}
+
+  defp validate_expected_connection(repo, provider, tenant_id, connection_id, expected_subject)
+       when is_integer(connection_id) do
+    case repo.get_by(Connection,
+           id: connection_id,
+           provider_id: provider.id,
+           tenant_id: tenant_id
+         ) do
+      %Connection{} = connection ->
+        with :ok <- validate_expected_generation(repo, connection),
+             {:ok, subject} <-
+               validate_expected_subject(connection.account_subject, expected_subject) do
+          {:ok, %{id: connection.id, subject: subject}}
+        end
+
+      nil ->
+        {:error, :stale_connection}
+    end
+  end
+
+  defp validate_expected_connection(_repo, _provider, _tenant_id, _id, _subject),
+    do: {:error, :stale_connection}
+
+  defp validate_expected_generation(repo, %Connection{status: status} = connection)
+       when status in [:active, :expired] do
+    if Tango.ConnectionLock.other_active_generation?(
+         repo,
+         connection.provider_id,
+         connection.tenant_id,
+         connection.id
+       ),
+       do: {:error, :stale_connection},
+       else: :ok
+  end
+
+  defp validate_expected_generation(_repo, %Connection{}), do: {:error, :stale_connection}
+
+  defp validate_expected_subject(nil, nil), do: {:ok, nil}
+  defp validate_expected_subject(nil, subject) when is_binary(subject), do: {:ok, subject}
+  defp validate_expected_subject(subject, nil) when is_binary(subject), do: {:ok, subject}
+  defp validate_expected_subject(subject, subject), do: {:ok, subject}
+  defp validate_expected_subject(_known, _provided), do: {:error, :account_mismatch}
+
   @doc """
   Generates OAuth authorization URL with PKCE support.
 
@@ -84,8 +219,13 @@ defmodule Tango.Auth do
     with {:ok, session} <- get_valid_session(session_token),
          {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
          {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider) do
-      redirect_uri = Keyword.fetch!(opts, :redirect_uri)
-      scopes = Keyword.get(opts, :scopes, provider.default_scopes)
+      redirect_uri = Keyword.get(opts, :redirect_uri, session.redirect_uri)
+
+      scopes =
+        case session.scopes do
+          [] -> Keyword.get(opts, :scopes, provider.default_scopes)
+          scopes -> scopes
+        end
 
       # Validate redirect URI for security
       with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
@@ -95,11 +235,33 @@ defmodule Tango.Auth do
     end
   end
 
+  @doc """
+  Generates an authorization URL from the values bound to a session.
+  """
+  @spec authorization_url(OAuthSession.t()) :: auth_url_result()
+  def authorization_url(%OAuthSession{} = session) do
+    with false <- OAuthSession.expired?(session),
+         redirect_uri when is_binary(redirect_uri) <- session.redirect_uri,
+         {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
+         {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
+         :ok <- Tango.Validation.validate_redirect_uri(redirect_uri) do
+      build_auth_url(oauth_config, provider, session, redirect_uri, session.scopes)
+    else
+      true -> {:error, :session_expired}
+      nil -> {:error, :invalid_redirect_uri}
+      error -> error
+    end
+  end
+
   defp build_auth_url(oauth_config, provider, session, redirect_uri, scopes) do
+    provider_params = metadata_auth_params(provider)
+    session_params = session.auth_params || %{}
+
     auth_params =
-      build_base_auth_params(oauth_config, session, redirect_uri, scopes)
-      |> maybe_add_pkce_challenge(session)
-      |> merge_metadata_auth_params(provider)
+      provider_params
+      |> Map.merge(session_params)
+      |> Map.merge(build_base_auth_params(oauth_config, provider, session, redirect_uri, scopes))
+      |> maybe_add_pkce_challenge(session, pkce_disabled?(provider))
 
     Logger.info(
       "Tango OAuth building authorization URL: provider=#{provider.slug}, " <>
@@ -110,19 +272,32 @@ defmodule Tango.Auth do
     {:ok, build_authorization_url(oauth_config.auth_url, auth_params)}
   end
 
-  defp build_base_auth_params(oauth_config, session, redirect_uri, scopes) do
+  defp build_base_auth_params(oauth_config, provider, session, redirect_uri, scopes) do
     %{
-      "client_id" => oauth_config.client_id,
+      "client_id" => session.oauth_client_id || oauth_config.client_id,
       "response_type" => "code",
       "redirect_uri" => redirect_uri,
-      "scope" => Enum.join(scopes, " "),
+      "scope" => Enum.join(scopes, scope_separator(provider)),
       "state" => encode_state_with_tenant(session.state, session.tenant_id)
     }
   end
 
-  defp maybe_add_pkce_challenge(auth_params, %{code_verifier: nil}), do: auth_params
+  # Nango catalog `scope_separator` (default " "), recorded in provider metadata.
+  defp scope_separator(%{metadata: %{"scope_separator" => separator}})
+       when is_binary(separator) and separator != "",
+       do: separator
 
-  defp maybe_add_pkce_challenge(auth_params, session) do
+  defp scope_separator(_provider), do: " "
+
+  # Nango catalog `disable_pkce`: no code_challenge on the authorization URL
+  # and no code_verifier on the code exchange.
+  defp pkce_disabled?(%{metadata: %{"disable_pkce" => true}}), do: true
+  defp pkce_disabled?(_provider), do: false
+
+  defp maybe_add_pkce_challenge(auth_params, _session, true), do: auth_params
+  defp maybe_add_pkce_challenge(auth_params, %{code_verifier: nil}, false), do: auth_params
+
+  defp maybe_add_pkce_challenge(auth_params, session, false) do
     challenge = OAuthSession.generate_code_challenge(session)
 
     Map.merge(auth_params, %{
@@ -131,14 +306,12 @@ defmodule Tango.Auth do
     })
   end
 
-  # Merges provider metadata auth_params into authorization parameters.
-  # Metadata params are merged first so standard OAuth params take precedence (security).
-  defp merge_metadata_auth_params(auth_params, %{metadata: %{"auth_params" => params}})
+  defp metadata_auth_params(%{metadata: %{"auth_params" => params}})
        when is_map(params) and map_size(params) > 0 do
-    Map.merge(params, auth_params)
+    params
   end
 
-  defp merge_metadata_auth_params(auth_params, _provider), do: auth_params
+  defp metadata_auth_params(_provider), do: %{}
 
   @doc """
   Exchanges authorization code for access token.
@@ -192,12 +365,9 @@ defmodule Tango.Auth do
            {:ok, original_state, decoded_tenant_id} <- decode_state_with_tenant(state),
            ^tenant_id <- decoded_tenant_id,
            {:ok, session} <- get_session_by_state(original_state, tenant_id),
+           :ok <- reject_staged_session(session),
            :ok <- OAuthSession.validate_state(session, original_state),
            :ok <- validate_redirect_uri_binding(session, validated_opts[:redirect_uri]) do
-        Logger.info(
-          "Tango OAuth validation complete: session_id=#{session.id}, redirect_uri=#{validated_opts[:redirect_uri]}"
-        )
-
         {:ok, %{session: session, validated_opts: validated_opts}}
       else
         {:error, error} when is_atom(error) ->
@@ -217,19 +387,23 @@ defmodule Tango.Auth do
                                           } ->
       with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
            {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
-           _ <-
-             Logger.info("Tango OAuth performing token exchange for provider=#{provider.slug}"),
            {:ok, token_response} <-
-             perform_token_exchange(oauth_config, session, authorization_code, validated_opts) do
-        Logger.info("Tango OAuth token exchange successful")
+             perform_token_exchange(
+               oauth_config,
+               provider,
+               session,
+               authorization_code,
+               validated_opts
+             ) do
         {:ok, %{provider: provider, token_response: token_response}}
       else
-        {:error, reason} = error ->
-          Logger.error("Tango OAuth token exchange step failed: #{inspect(reason)}")
-          error
+        {:error, reason} ->
+          safe_reason = safe_exchange_error(reason)
+          Logger.error("Tango OAuth token exchange failed: #{inspect(safe_reason)}")
+          {:error, safe_reason}
 
-        result ->
-          Logger.error("Tango OAuth token exchange invalid result: #{inspect(result)}")
+        _result ->
+          Logger.error("Tango OAuth token exchange failed: :token_exchange_failed")
           {:error, :token_exchange_failed}
       end
     end)
@@ -370,40 +544,50 @@ defmodule Tango.Auth do
     "#{base_url}?#{query_string}"
   end
 
-  defp perform_token_exchange(oauth_config, session, authorization_code, opts) do
+  # Staged sessions complete only through Tango.stage_authorization/4 and a
+  # trusted verifier; the immediate exchange never consumes them.
+  defp reject_staged_session(%OAuthSession{} = session) do
+    if staged_session?(session), do: {:error, :invalid_session}, else: :ok
+  end
+
+  @doc """
+  Returns true when the session carries staged-authorization bindings (a
+  completion origin or an intent reference).
+
+  Staged sessions complete only through `Tango.stage_authorization/4`.
+  """
+  def staged_session?(%OAuthSession{completion_origin: origin, intent_reference: reference}),
+    do: not is_nil(origin) or not is_nil(reference)
+
+  # Reduces a failed token exchange to an atom or `{:oauth_error, category}` so
+  # provider response bodies and headers never reach logs or callers.
+  defp safe_exchange_error(%OAuth2.Response{} = response), do: sanitize_oauth_error(response)
+  defp safe_exchange_error(%OAuth2.Error{reason: reason}), do: safe_exchange_error(reason)
+  defp safe_exchange_error({:oauth_error, _category} = error), do: error
+  defp safe_exchange_error(reason) when is_atom(reason), do: reason
+  defp safe_exchange_error(_reason), do: :token_exchange_failed
+
+  defp perform_token_exchange(oauth_config, provider, session, authorization_code, opts) do
     validated_redirect_uri = Keyword.get(opts, :redirect_uri)
+    session = if pkce_disabled?(provider), do: %{session | code_verifier: nil}, else: session
+    token_params = build_token_params(authorization_code, session, validated_redirect_uri)
 
-    with client <- build_oauth_client(oauth_config, opts),
-         token_params <- build_token_params(authorization_code, session, validated_redirect_uri),
-         _ <- log_token_exchange_params(token_params, session),
-         {:ok, %{token: token}} <- OAuth2.Client.get_token(client, token_params),
+    with {:ok, %{token: token}} <-
+           Tango.TokenRequest.exchange(
+             oauth_config,
+             provider.metadata,
+             token_params,
+             validated_redirect_uri
+           ),
          :ok <- validate_access_token(token.access_token) do
-      token_response = convert_token_to_response(token)
-
-      Logger.info(
-        "Tango OAuth token exchange successful, converted response: #{inspect(Map.drop(token_response, ["access_token"]))}"
-      )
-
-      {:ok, token_response}
+      {:ok, convert_token_to_response(token)}
     else
       {:error, %OAuth2.Error{reason: reason}} ->
-        Logger.error("Tango OAuth2 error: #{inspect(reason)}")
         {:error, reason}
 
       {:error, reason} ->
-        Logger.error("Tango OAuth token exchange error: #{inspect(reason)}")
         {:error, reason}
     end
-  end
-
-  defp build_oauth_client(oauth_config, opts) do
-    OAuth2.Client.new(
-      client_id: oauth_config.client_id,
-      client_secret: oauth_config.client_secret,
-      token_url: oauth_config.token_url,
-      redirect_uri: Keyword.get(opts, :redirect_uri),
-      serializers: %{"application/json" => Jason}
-    )
   end
 
   defp build_token_params(
@@ -448,38 +632,69 @@ defmodule Tango.Auth do
 
   defp should_include_redirect_uri?(_), do: false
 
-  defp log_token_exchange_params(params, session) do
-    redirect_uri_status =
-      case Keyword.get(params, :redirect_uri) do
-        nil -> "omitted"
-        uri -> "included: #{String.slice(uri, 0, 50)}..."
-      end
+  @doc """
+  Exchanges an authorization code for the session's provider and returns the raw
+  token response.
 
-    session_redirect_uri =
-      case session.redirect_uri do
-        nil -> "nil"
-        "" -> "empty"
-        uri -> String.slice(uri, 0, 50) <> "..."
-      end
-
-    Logger.info(
-      "Tango OAuth token exchange params: redirect_uri #{redirect_uri_status}, " <>
-        "session.redirect_uri: #{session_redirect_uri}, " <>
-        "code: #{String.slice(Keyword.get(params, :code, ""), 0, 10)}..."
-    )
+  Fails with `{:error, :client_changed}` when the provider's OAuth client no
+  longer matches the client recorded on the session. Other failures are reduced
+  to `{:error, atom}` or `{:error, {:oauth_error, category}}`; provider response
+  bodies are never returned.
+  """
+  def exchange_authorization_code(%OAuthSession{} = session, authorization_code, redirect_uri)
+      when is_binary(authorization_code) and is_binary(redirect_uri) do
+    with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
+         {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
+         true <- oauth_config.client_id == session.oauth_client_id,
+         {:ok, response} <-
+           perform_token_exchange(oauth_config, provider, session, authorization_code,
+             redirect_uri: redirect_uri
+           ) do
+      {:ok, response}
+    else
+      false -> {:error, :client_changed}
+      {:error, reason} -> {:error, sanitize_oauth_error(reason)}
+      _ -> {:error, {:oauth_error, :provider_error}}
+    end
   end
 
-  @doc false
+  defp sanitize_oauth_error({:oauth_error, _category} = error), do: error
+
+  defp sanitize_oauth_error(%OAuth2.Response{body: body}),
+    do: {:oauth_error, oauth_error_category(body)}
+
+  defp sanitize_oauth_error(%OAuth2.Error{reason: reason}), do: sanitize_oauth_error(reason)
+  defp sanitize_oauth_error(reason) when is_atom(reason), do: {:oauth_error, reason}
+  defp sanitize_oauth_error(reason), do: {:oauth_error, oauth_error_category(reason)}
+
+  defp oauth_error_category(%{"error" => error}), do: map_oauth_error_code(error)
+
+  defp oauth_error_category(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> oauth_error_category(decoded)
+      _ -> :provider_error
+    end
+  end
+
+  defp oauth_error_category(_), do: :provider_error
+
+  @doc """
+  Converts an `OAuth2.AccessToken` into the string-keyed token response map used
+  by connection creation.
+  """
   def convert_token_to_response(token) do
     access_token = extract_access_token(token.access_token)
 
-    %{
+    response = %{
       "access_token" => access_token,
       "refresh_token" => token.refresh_token,
       "token_type" => token.token_type,
-      "expires_in" => calculate_expires_in_seconds(token.expires_at),
-      "scope" => token.other_params["scope"]
+      "expires_in" => calculate_expires_in_seconds(token.expires_at)
     }
+
+    if Map.has_key?(token.other_params, "scope"),
+      do: Map.put(response, "scope", token.other_params["scope"]),
+      else: response
   end
 
   # Extract actual access token from potentially JSON-encoded response
@@ -498,6 +713,8 @@ defmodule Tango.Auth do
 
   # Atomic version for transaction usage
   defp create_connection_from_token_atomic(repo, provider_id, tenant_id, token_response) do
+    :ok = Tango.ConnectionLock.lock(repo, provider_id, tenant_id)
+
     # Revoke any existing active connections for this provider/tenant atomically
     {_count, _} =
       from(c in Connection,
@@ -508,8 +725,10 @@ defmodule Tango.Auth do
       |> repo.update_all(set: [status: :revoked, updated_at: DateTime.utc_now()])
 
     # Create new connection
-    Connection.from_token_response(provider_id, tenant_id, token_response)
-    |> repo.insert()
+    Tango.RedactedParams.insert(
+      repo,
+      Connection.from_token_response(provider_id, tenant_id, token_response)
+    )
   end
 
   # Update session with redirect_uri if not already set (for authorize_url flow)
@@ -596,14 +815,18 @@ defmodule Tango.Auth do
   end
 
   # Decode tenant ID from OAuth state parameter
-  def decode_state_with_tenant(encoded_state) do
+  def decode_state_with_tenant(encoded_state) when is_binary(encoded_state) do
     with {:ok, decoded} <- Base.url_decode64(encoded_state, padding: false),
-         {:ok, state_data} <- Jason.decode(decoded) do
-      {:ok, state_data["csrf_token"], state_data["tenant_id"]}
+         {:ok, %{} = state_data} <- Jason.decode(decoded),
+         csrf when is_binary(csrf) and byte_size(csrf) > 0 <- state_data["csrf_token"],
+         tenant when is_binary(tenant) and byte_size(tenant) > 0 <- state_data["tenant_id"] do
+      {:ok, csrf, tenant}
     else
       _ -> {:error, :invalid_state_format}
     end
   end
+
+  def decode_state_with_tenant(_), do: {:error, :invalid_state_format}
 
   # Logs failed token exchange attempts with session context
   defp log_failed_token_exchange(state, tenant_id, reason) do
@@ -611,7 +834,7 @@ defmodule Tango.Auth do
       {:ok, original_state, decoded_tenant_id} when decoded_tenant_id == tenant_id ->
         case get_session_by_state(original_state, tenant_id) do
           {:ok, session} ->
-            AuditLog.log_token_exchange(session, nil, false, reason)
+            AuditLog.log_token_exchange(session, nil, false, audit_error_code(reason))
             |> repo().insert()
 
           _ ->
@@ -622,6 +845,20 @@ defmodule Tango.Auth do
         :ok
     end
   end
+
+  @doc """
+  Maps an exchange failure to an enumerated audit error code.
+
+  Audit rows store only enumerated categories, never provider payloads; anything
+  unrecognized becomes `:unknown_error`.
+  """
+  def audit_error_code({:oauth_error, category}), do: audit_error_code(category)
+
+  def audit_error_code(reason) when is_atom(reason) do
+    if reason in Ecto.Enum.values(AuditLog, :error_code), do: reason, else: :unknown_error
+  end
+
+  def audit_error_code(_reason), do: :unknown_error
 
   @doc """
   Generate authorization URL with optional scopes.
@@ -638,62 +875,94 @@ defmodule Tango.Auth do
   end
 
   @doc """
-  Parse OAuth scopes from various formats.
+  Parse OAuth scopes from space- or comma-separated strings, or lists.
   """
-  def parse_scopes(scopes) when is_binary(scopes) do
-    String.split(scopes, " ", trim: true)
-  end
+  defdelegate parse_scopes(scopes), to: Tango.Validation
 
-  def parse_scopes(scopes) when is_list(scopes), do: scopes
-  def parse_scopes(_), do: []
+  @type callback_result :: %{payload: map() | nil, origin: String.t() | nil}
 
   @doc """
-  Perform OAuth callback exchange for popup flows.
+  Completes a popup OAuth callback by staging the authorization code.
+
+  Only sessions created with `create_authorization_session/3` can complete
+  here. The code is exchanged into an encrypted, short-lived candidate and the
+  result carries only the opaque completion handle plus the session's intent
+  reference. Failures carry a stable category and the intent reference. Neither
+  shape includes tokens or provider response bodies.
+
+  Returns `%{payload: payload, origin: origin}`, where `origin` is the session's
+  validated completion origin. When the callback cannot be tied to a staged
+  session with an allowed origin, both values are `nil` and nothing is posted.
   """
-  def perform_callback_exchange(_conn, nil, _state), do: nil
-  def perform_callback_exchange(_conn, _code, nil), do: nil
+  @spec process_popup_callback(map()) :: callback_result()
+  def process_popup_callback(params) when is_map(params) do
+    state = params["state"]
+    error = binary_param(params["error"])
 
-  def perform_callback_exchange(conn, code, state) do
-    Logger.info(
-      "Tango OAuth callback exchange starting: code=#{String.slice(code || "nil", 0, 10)}..., state=#{String.slice(state || "nil", 0, 20)}..."
-    )
+    if error, do: log_oauth_callback_error(state, error, params["error_description"])
 
-    with {:ok, tenant_id, original_state} <- decode_state_safely(state),
-         {:ok, session} <- get_session_by_state(original_state, tenant_id),
-         callback_url <- session.redirect_uri || build_https_callback_url(conn),
-         _ <-
-           Logger.info(
-             "Tango OAuth using callback_url=#{callback_url}, session.redirect_uri=#{session.redirect_uri}"
-           ),
-         {:ok, connection} <-
-           exchange_code(state, code, tenant_id, redirect_uri: callback_url),
-         {:ok, provider} <- Tango.get_provider_by_id(connection.provider_id),
-         access_token <- Connection.get_raw_access_token(connection) do
-      Logger.info("Tango OAuth exchange successful")
-      {:ok, build_connection_response(connection, provider, access_token)}
-    else
-      {:error, reason} = error ->
-        Logger.error("Tango OAuth exchange failed: #{inspect(reason)}")
-        error
-
-      result ->
-        Logger.error("Tango OAuth exchange invalid result: #{inspect(result)}")
-        {:error, :invalid_state}
+    case Tango.Authorization.callback_context(state) do
+      {:ok, context} -> popup_result(context, state, error, binary_param(params["code"]))
+      {:error, _reason} -> %{payload: nil, origin: nil}
     end
   end
 
-  @doc """
-  Build connection response for OAuth callbacks.
-  """
-  def build_connection_response(connection, provider, access_token) do
+  def process_popup_callback(_params), do: %{payload: nil, origin: nil}
+
+  defp popup_result(context, _state, error, _code) when is_binary(error),
+    do: popup_failure(context, map_oauth_error_code(error))
+
+  defp popup_result(context, _state, nil, nil),
+    do: popup_failure(context, :missing_callback_params)
+
+  defp popup_result(context, state, nil, code) do
+    case Tango.Authorization.stage_authorization(state, code, context.tenant_id,
+           redirect_uri: context.redirect_uri
+         ) do
+      {:ok, completion} ->
+        %{
+          origin: context.completion_origin,
+          payload: %{
+            type: "oauth_complete",
+            completion_handle: completion.completion_handle,
+            intent_reference: completion.intent_reference
+          }
+        }
+
+      {:error, reason} ->
+        popup_failure(context, reason)
+    end
+  end
+
+  defp popup_failure(context, reason) do
     %{
-      provider: provider.name,
-      status: connection.status,
-      scopes: connection.granted_scopes,
-      expires_at: connection.expires_at,
-      access_token: access_token
+      origin: context.completion_origin,
+      payload: %{
+        type: "oauth_error",
+        error: callback_error_category(reason),
+        intent_reference: context.intent_reference
+      }
     }
   end
+
+  @stable_callback_categories [:invalid_session, :client_changed, :invalid_authorization_code]
+
+  defp callback_error_category({:oauth_error, category}) when is_atom(category),
+    do: Atom.to_string(category)
+
+  defp callback_error_category(reason) when reason in @stable_callback_categories,
+    do: Atom.to_string(reason)
+
+  defp callback_error_category(reason) when is_atom(reason) do
+    if reason in Ecto.Enum.values(AuditLog, :error_code),
+      do: Atom.to_string(reason),
+      else: "callback_failed"
+  end
+
+  defp callback_error_category(_reason), do: "callback_failed"
+
+  defp binary_param(value) when is_binary(value) and value != "", do: value
+  defp binary_param(_value), do: nil
 
   @doc """
   Safely decode OAuth state parameter.
@@ -711,13 +980,17 @@ defmodule Tango.Auth do
 
   @doc """
   Log OAuth callback errors with audit trail.
+
+  The audit row stores the mapped error category and a hash of the session
+  state. The provider's raw error code and description are not persisted.
   """
   def log_oauth_callback_error(state, error, error_description) do
     # Try to decode state to get tenant ID and session info
     {tenant_id, session_id, event_type, error_code} =
       case decode_state_safely(state) do
-        {:ok, decoded_tenant_id, original_state} ->
-          {decoded_tenant_id, original_state, classify_oauth_error(error),
+        {:ok, decoded_tenant_id, original_state}
+        when is_binary(decoded_tenant_id) and is_binary(original_state) ->
+          {decoded_tenant_id, hash_state(original_state), classify_oauth_error(error),
            map_oauth_error_code(error)}
 
         _ ->
@@ -725,8 +998,8 @@ defmodule Tango.Auth do
       end
 
     event_data = %{
-      oauth_error: error,
-      error_description: error_description,
+      oauth_error: Atom.to_string(error_code),
+      has_error_description: is_binary(error_description) and error_description != "",
       state_present: !is_nil(state),
       state_decodable: tenant_id != "unknown"
     }
@@ -737,11 +1010,13 @@ defmodule Tango.Auth do
       {:ok, _} ->
         :ok
 
-      {:error, reason} ->
-        Logger.warning("Failed to log OAuth callback error: #{inspect(reason)}")
+      {:error, _changeset} ->
+        Logger.warning("Failed to log OAuth callback error")
         :ok
     end
   end
+
+  defp hash_state(state), do: :crypto.hash(:sha256, state) |> Base.encode16(case: :lower)
 
   @doc """
   Classify OAuth error types.
@@ -794,23 +1069,43 @@ defmodule Tango.Auth do
     "#{scheme}://#{host}#{port}/api/oauth/callback"
   end
 
-  @doc """
-  Generate OAuth callback HTML page for popup flows.
-  """
-  def generate_callback_html(_code, _state, _error, _error_description, exchange_result) do
-    Logger.info(
-      "Tango generating callback HTML with exchange_result: #{inspect(exchange_result)}"
-    )
+  # frame-ancestors is ignored when delivered in a <meta> element, so it is
+  # added only to the response header.
+  @callback_csp_directives [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "base-uri 'none'",
+    "form-action 'none'"
+  ]
 
-    # Safely encode exchange result for JavaScript injection
-    # Use HTML escaping to prevent XSS attacks
-    result_json =
-      case exchange_result do
-        {:ok, data} -> Jason.encode!(data)
-        {:error, reason} -> Jason.encode!(%{error: format_error_reason(reason)})
-        nil -> "null"
-      end
-      |> html_escape_json()
+  @doc """
+  Content Security Policy sent with the popup callback page.
+  """
+  def callback_content_security_policy do
+    Enum.join(@callback_csp_directives ++ ["frame-ancestors 'none'"], "; ")
+  end
+
+  # Interpolated into a double-quoted attribute, so only `&` and `"` need
+  # escaping; CSP source keywords keep their single quotes readable.
+  defp callback_meta_content_security_policy do
+    @callback_csp_directives
+    |> Enum.join("; ")
+    |> String.replace(["&", "\""], fn
+      "&" -> "&amp;"
+      "\"" -> "&quot;"
+    end)
+  end
+
+  @doc """
+  Generates the popup callback page for a `process_popup_callback/1` result.
+
+  The page posts the payload to the session's exact completion origin and never
+  falls back to a wildcard target. Payload and origin are encoded with
+  `script_json/1` so they cannot break out of the script element.
+  """
+  @spec generate_callback_html(callback_result()) :: String.t()
+  def generate_callback_html(%{payload: payload, origin: origin}) do
+    {status, payload_json, origin_json} = callback_page_values(payload, origin)
 
     """
     <!DOCTYPE html>
@@ -818,95 +1113,20 @@ defmodule Tango.Auth do
     <head>
       <title>OAuth Callback</title>
       <meta charset="utf-8">
-      <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self';">
+      <meta http-equiv="Content-Security-Policy" content="#{callback_meta_content_security_policy()}">
+      <meta name="referrer" content="no-referrer">
     </head>
     <body>
-      <div id="status">Processing OAuth callback...</div>
-
+      <div id="status">#{status}</div>
       <script>
         (function() {
-          const urlParams = new URLSearchParams(window.location.search);
-          const code = urlParams.get('code');
-          const state = urlParams.get('state');
-          const error = urlParams.get('error');
-          const errorDescription = urlParams.get('error_description');
+          const payload = #{payload_json};
+          const completionOrigin = #{origin_json};
 
-          async function handleCallback() {
-            try {
-              if (error) {
-                throw new Error(errorDescription || error);
-              }
-
-              // Use server-side exchange result instead of making API calls
-              const exchangeResult = #{result_json};
-              console.log('Tango callback - exchangeResult:', exchangeResult);
-
-              if (!exchangeResult) {
-                console.error('Tango callback - No exchange result');
-                throw new Error('Missing authorization code or state parameter');
-              }
-
-              if (exchangeResult.error) {
-                console.error('Tango callback - Exchange error:', exchangeResult.error);
-                throw new Error(exchangeResult.error);
-              }
-
-              // Send success result to parent window
-              if (window.opener) {
-                console.log('Tango callback - Sending postMessage to opener');
-
-                // Determine target origin: try reading opener's origin, fall back to "*"
-                // Cross-origin popups (e.g. API on :4000, frontend on :3000) cannot
-                // read window.opener.location.origin due to COOP restrictions
-                let targetOrigin = '*';
-                try {
-                  targetOrigin = window.opener.location.origin;
-                } catch (_e) {
-                  console.log('Tango callback - Cross-origin opener, using wildcard targetOrigin');
-                }
-                console.log('Tango callback - Target origin:', targetOrigin);
-
-                window.opener.postMessage({
-                  type: 'oauth_complete',
-                  connection: {
-                    provider: exchangeResult.provider,
-                    status: exchangeResult.status,
-                    scopes: exchangeResult.scopes || [],
-                    expires_at: exchangeResult.expires_at,
-                    token: exchangeResult.access_token
-                  }
-                }, targetOrigin);
-                console.log('Tango callback - PostMessage sent successfully');
-
-                // Close popup after successful message
-                setTimeout(() => window.close(), 100);
-              } else {
-                console.error('Tango callback - No window.opener found');
-              }
-
-              document.getElementById('status').textContent = 'OAuth flow completed successfully. You can close this window.';
-
-            } catch (error) {
-              console.error('OAuth callback error:', error);
-
-              // Send error to parent window
-              if (window.opener) {
-                let errorTargetOrigin = '*';
-                try {
-                  errorTargetOrigin = window.opener.location.origin;
-                } catch (_e) { /* cross-origin */ }
-                window.opener.postMessage({
-                  type: 'oauth_error',
-                  error: error.message
-                }, errorTargetOrigin);
-              }
-
-              document.getElementById('status').textContent = 'OAuth flow failed: ' + error.message;
-            }
+          if (payload && completionOrigin && window.opener) {
+            window.opener.postMessage(payload, completionOrigin);
+            window.close();
           }
-
-          // Process callback when page loads
-          handleCallback();
         })();
       </script>
     </body>
@@ -914,23 +1134,32 @@ defmodule Tango.Auth do
     """
   end
 
-  # Format error reasons for JSON encoding, handling OAuth2.Response structs
-  defp format_error_reason(%OAuth2.Response{status_code: status, body: body}) do
-    case Jason.decode(body) do
-      {:ok, %{"error_description" => desc}} -> desc
-      {:ok, %{"error" => error}} -> error
-      _ -> "OAuth error (HTTP #{status})"
-    end
-  end
+  defp callback_page_values(%{type: type} = payload, origin)
+       when type in ["oauth_complete", "oauth_error"] and is_binary(origin),
+       do: {status_text(type), script_json(payload), script_json(origin)}
 
-  defp format_error_reason(reason) when is_binary(reason), do: reason
-  defp format_error_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp format_error_reason(reason), do: inspect(reason)
+  defp callback_page_values(_payload, _origin),
+    do: {"This OAuth callback could not be completed. You can close this window.", "null", "null"}
 
-  def html_escape_json(json_string) do
-    # Jason.encode! with escape: :html_safe handles XSS prevention automatically
-    json_string
-    |> Jason.decode!()
-    |> Jason.encode!(escape: :html_safe)
+  defp status_text("oauth_complete"), do: "OAuth flow completed. You can close this window."
+  defp status_text("oauth_error"), do: "OAuth flow failed. You can close this window."
+
+  @doc """
+  Encodes a term as JSON that is safe to embed inside an HTML `<script>` element.
+
+  `<`, `>`, `&`, and the JavaScript line separators are written as unicode
+  escapes, so no value can close the element or open an HTML comment.
+  """
+  @spec script_json(term()) :: String.t()
+  def script_json(term) do
+    term
+    |> Jason.encode!()
+    |> String.replace(["<", ">", "&", "\u2028", "\u2029"], fn
+      "<" -> "\\u003c"
+      ">" -> "\\u003e"
+      "&" -> "\\u0026"
+      "\u2028" -> "\\u2028"
+      "\u2029" -> "\\u2029"
+    end)
   end
 end

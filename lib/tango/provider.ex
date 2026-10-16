@@ -101,6 +101,9 @@ defmodule Tango.Provider do
   @doc """
   Creates a provider from Nango configuration.
 
+  See `Tango.Schemas.Provider.from_nango_config/3` for the accepted options
+  (including `:auth_url`/`:token_url` overrides) and validation rules.
+
   ## Examples
 
       iex> create_provider_from_nango("github", nango_config, client_id: "abc", client_secret: "xyz")

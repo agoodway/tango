@@ -22,8 +22,14 @@ defmodule Tango.MigrationsTest do
       assert function_exported?(Tango.Migrations.V02, :down, 1)
     end
 
-    test "current version is 2" do
-      assert Tango.Migration.current_version() == 2
+    test "V03 migration module exists and has correct functions" do
+      assert Code.ensure_loaded?(Tango.Migrations.V03)
+      assert function_exported?(Tango.Migrations.V03, :up, 1)
+      assert function_exported?(Tango.Migrations.V03, :down, 1)
+    end
+
+    test "current version is 3" do
+      assert Tango.Migration.current_version() == 3
     end
 
     test "follows Oban pattern for consuming applications" do

@@ -55,7 +55,10 @@ config :phoenix, :json_library, Jason
 config :tango,
   repo: Demo.Repo,
   encryption_key: "01234567890123456789012345678901",
-  api_key: "lets-dance-the-tango"
+  api_key: "lets-dance-the-tango",
+  # Exact origins of the pages that host the connect button. The OAuth callback
+  # page posts the completion handle to the session's origin and nowhere else.
+  allowed_completion_origins: ["http://localhost:4000", "http://localhost:4002"]
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

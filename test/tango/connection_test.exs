@@ -11,6 +11,46 @@ defmodule Tango.ConnectionTest do
   alias Tango.{Factory, OAuthMockServer}
   alias Tango.Schemas.Connection, as: ConnectionSchema
 
+  describe "refresh_changeset/2" do
+    test "preserves omitted scopes and clears explicitly empty scopes" do
+      connection = %ConnectionSchema{granted_scopes: ["records.read"]}
+
+      omitted =
+        ConnectionSchema.refresh_changeset(connection, %{"access_token" => "fresh"})
+
+      explicit =
+        ConnectionSchema.refresh_changeset(connection, %{
+          "access_token" => "fresh",
+          "scope" => ""
+        })
+
+      assert Ecto.Changeset.get_field(omitted, :granted_scopes) == ["records.read"]
+      assert Ecto.Changeset.get_field(explicit, :granted_scopes) == []
+    end
+  end
+
+  describe "token response conversion" do
+    test "preserves whether the provider omitted scope" do
+      omitted =
+        OAuth2.AccessToken.new(%{
+          "access_token" => "fresh",
+          "expires_in" => 3600,
+          "token_type" => "Bearer"
+        })
+
+      explicit =
+        OAuth2.AccessToken.new(%{
+          "access_token" => "fresh",
+          "expires_in" => 3600,
+          "token_type" => "Bearer",
+          "scope" => ""
+        })
+
+      refute Map.has_key?(Tango.Auth.convert_token_to_response(omitted), "scope")
+      assert Tango.Auth.convert_token_to_response(explicit)["scope"] == ""
+    end
+  end
+
   describe "list_connections/2" do
     test "lists active connections for a tenant" do
       provider1 = Factory.create_github_provider("_list1")
@@ -104,6 +144,43 @@ defmodule Tango.ConnectionTest do
       # Should not retrieve non-existent connection (use proper UUID format)
       fake_id = 999_999
       assert {:error, :not_found} = Tango.Connection.get_connection(fake_id, tenant_id)
+    end
+  end
+
+  describe "get_active_connection/3" do
+    test "returns an active tenant-owned connection without refreshing by default" do
+      provider = Factory.create_github_provider("_active_get")
+      tenant_id = Factory.tenant_id("active_get")
+      conn = Factory.create_github_connection(provider, tenant_id)
+
+      assert {:ok, retrieved} = Tango.get_active_connection(conn.id, tenant_id)
+      assert retrieved.id == conn.id
+      assert retrieved.status == :active
+    end
+
+    test "hides another tenant's connection without requesting a token" do
+      bypass = Bypass.open()
+      {:ok, requests} = Agent.start_link(fn -> 0 end)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        Agent.update(requests, &(&1 + 1))
+        Plug.Conn.resp(conn, 500, "")
+      end)
+
+      provider =
+        Factory.create_google_provider("_active_cross_tenant",
+          urls: OAuthMockServer.google_urls(bypass)
+        )
+
+      conn =
+        provider
+        |> Factory.create_connection(Factory.tenant_id("active_owner"))
+        |> expire_in(60)
+
+      assert {:error, :not_found} =
+               Tango.get_active_connection(conn.id, "other-tenant", auto_refresh: true)
+
+      assert Agent.get(requests, & &1) == 0
     end
   end
 
@@ -569,6 +646,65 @@ defmodule Tango.ConnectionTest do
   end
 
   describe "refresh_connection/1" do
+    test "forces refresh even while the access token is still valid" do
+      bypass = Bypass.open()
+
+      OAuthMockServer.setup_google_oauth(bypass,
+        success_response: %{
+          "access_token" => "forced_access_token",
+          "expires_in" => 3600,
+          "token_type" => "Bearer"
+        }
+      )
+
+      provider =
+        Factory.create_google_provider("_forced_refresh",
+          urls: OAuthMockServer.google_urls(bypass)
+        )
+
+      conn = Factory.create_connection(provider, Factory.tenant_id("forced_refresh"))
+      assert DateTime.compare(conn.expires_at, DateTime.utc_now()) == :gt
+
+      assert {:ok, updated_without_refresh} =
+               conn
+               |> ConnectionSchema.changeset(%{metadata: %{"updated" => true}})
+               |> Repo.update()
+
+      assert updated_without_refresh.lock_version > conn.lock_version
+      assert {:ok, refreshed} = Tango.Connection.refresh_connection(conn)
+      assert refreshed.access_token == "forced_access_token"
+      assert refreshed.granted_scopes == conn.granted_scopes
+    end
+
+    test "keeps rotated tokens when the success audit log cannot be written" do
+      bypass = Bypass.open()
+
+      OAuthMockServer.setup_google_oauth(bypass,
+        success_response: %{
+          "access_token" => "rotated_access_token",
+          "refresh_token" => "rotated_refresh_token",
+          "expires_in" => 3600,
+          "token_type" => "Bearer"
+        }
+      )
+
+      provider =
+        Factory.create_google_provider("_audit_failure_refresh",
+          urls: OAuthMockServer.google_urls(bypass)
+        )
+
+      conn = Factory.create_connection(provider, Factory.tenant_id("audit_failure_refresh"))
+      reject_audit_event("token_refreshed")
+
+      assert {:ok, refreshed} = Tango.Connection.refresh_connection(conn)
+      assert refreshed.access_token == "rotated_access_token"
+
+      stored = Repo.get!(ConnectionSchema, conn.id)
+      assert stored.access_token == "rotated_access_token"
+      assert stored.refresh_token == "rotated_refresh_token"
+      assert stored.refresh_attempts == 0
+    end
+
     test "validates refresh prerequisites" do
       provider = Factory.create_github_provider("_refresh")
       tenant_id = "tenant_refresh_test"
@@ -742,6 +878,21 @@ defmodule Tango.ConnectionTest do
       # Connection should still be active
       updated_conn = Repo.get!(ConnectionSchema, conn.id)
       assert updated_conn.status == :active
+    end
+
+    test "revokes an expired generation" do
+      provider = Factory.create_github_provider("_revoke_expired")
+      tenant_id = "tenant_revoke_expired_test"
+
+      expired =
+        provider
+        |> Factory.create_github_connection(tenant_id)
+        |> ConnectionSchema.changeset(%{status: :expired})
+        |> Repo.update!()
+
+      assert {:ok, revoked} = Tango.Connection.revoke_connection(expired, tenant_id)
+      assert revoked.status == :revoked
+      assert Repo.get!(ConnectionSchema, expired.id).status == :revoked
     end
   end
 
@@ -1015,6 +1166,26 @@ defmodule Tango.ConnectionTest do
       |> Repo.update()
 
     updated
+  end
+
+  # Installs a sandbox-scoped trigger that makes inserting one audit event fail
+  # at the database, the way a full disk or a dropped partition would.
+  defp reject_audit_event(event_type) do
+    Repo.query!("""
+    CREATE OR REPLACE FUNCTION tango_test_reject_audit() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.event_type = TG_ARGV[0] THEN
+        RAISE EXCEPTION 'audit insert rejected';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """)
+
+    Repo.query!("""
+    CREATE TRIGGER tango_test_reject_audit BEFORE INSERT ON tango_audit_logs
+    FOR EACH ROW EXECUTE FUNCTION tango_test_reject_audit('#{event_type}')
+    """)
   end
 
   describe "OAuth2 client configuration for token refresh" do

@@ -117,8 +117,88 @@ defmodule Tango.Catalog do
     YamlElixir.read_from_string(yaml_string)
   end
 
+  @doc """
+  Resolves `alias:` entries the way Nango does.
+
+  An entry such as `google-calendar: {alias: google, display_name: ...}` is
+  replaced by a shallow merge of its parent's config with its own keys, so the
+  child's top-level keys win and nested maps (`proxy`, `authorization_params`)
+  are replaced, not merged. This mirrors `loadProvidersYaml/0` in Nango's
+  `packages/providers/lib/index.ts` (`{ ...aliasData, ...overrides }`). The
+  `alias` key is kept so callers can see where the config came from.
+
+  Alias chains are followed regardless of file order. An entry whose parent is
+  missing, or whose chain loops, is returned unchanged; such entries have no
+  usable OAuth2 settings and are rejected when a provider is created.
+  """
+  def resolve_aliases(raw_providers) when is_map(raw_providers) do
+    Map.new(raw_providers, fn {name, config} ->
+      case resolve_alias(raw_providers, name, config, MapSet.new()) do
+        {:ok, resolved} -> {name, resolved}
+        :error -> {name, config}
+      end
+    end)
+  end
+
+  defp resolve_alias(raw_providers, name, %{"alias" => parent} = config, seen)
+       when is_binary(parent) do
+    seen = MapSet.put(seen, name)
+
+    with false <- MapSet.member?(seen, parent),
+         parent_config when is_map(parent_config) <- Map.get(raw_providers, parent),
+         {:ok, resolved_parent} <- resolve_alias(raw_providers, parent, parent_config, seen) do
+      {:ok, Map.merge(resolved_parent, config)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp resolve_alias(_raw_providers, _name, config, _seen), do: {:ok, config}
+
+  @doc """
+  Resolves a catalog template the way Nango does when a connection has no
+  connection configuration.
+
+  Nango's `interpolateStringFromObject/2` (`packages/shared/lib/utils/utils.ts`)
+  splits `a || b` on the first `||` only: it keeps the left side when
+  interpolating it changed it and otherwise interpolates the right side. With
+  no connection configuration nothing on the left can be interpolated, so the
+  right side wins. A blank right side yields `nil`.
+
+  Strings without `||` are returned unchanged, including any `${...}`
+  placeholders; see `unresolved_template?/1`. Non-strings pass through.
+
+  ## Examples
+
+      iex> Tango.Catalog.resolve_template("https://${connectionConfig.host}/auth || https://login.example.com/auth")
+      "https://login.example.com/auth"
+
+      iex> Tango.Catalog.resolve_template("https://example.com/auth")
+      "https://example.com/auth"
+
+  """
+  def resolve_template(value) when is_binary(value) do
+    case String.split(value, "||") do
+      [_single] -> value
+      [_left, right | _ignored] -> blank_to_nil(String.trim(right))
+    end
+  end
+
+  def resolve_template(value), do: value
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
+
+  @doc """
+  Returns true when a value still contains a `${...}` placeholder that only a
+  connection configuration could fill, which Tango does not support.
+  """
+  def unresolved_template?(value) when is_binary(value), do: String.contains?(value, "${")
+  def unresolved_template?(_value), do: false
+
   defp process_providers(raw_providers) when is_map(raw_providers) do
     raw_providers
+    |> resolve_aliases()
     |> Enum.map(fn {provider_name, config} ->
       processed_config =
         config

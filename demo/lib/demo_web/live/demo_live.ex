@@ -6,6 +6,8 @@ defmodule DemoWeb.DemoLive do
   import DemoWeb.TangoLogsComponent
   require Ecto.Query
 
+  alias Tango.Schemas.Connection
+
   @impl true
   def mount(_params, _session, socket) do
     socket =
@@ -16,8 +18,11 @@ defmodule DemoWeb.DemoLive do
       |> assign(:connected_provider, nil)
       |> assign(:audit_logs, [])
       |> assign(:connection_details, nil)
+      |> assign(:expected_connection_id, nil)
+      |> assign(:expected_subject, nil)
       |> assign(:loading_profile, false)
       |> assign(:page_title, "Tango Demo")
+      |> assign_expected_connection()
 
     {:ok, socket}
   end
@@ -30,10 +35,22 @@ defmodule DemoWeb.DemoLive do
         <div class="text-center mb-8">
           <h1 class="text-4xl font-bold tracking-tight">💃 Tango OAuth Demo</h1>
           <p class="text-base-content/60 mt-2">
-            <a href="https://github.com/agoodway/tango" target="_blank" class="link link-primary font-medium">Tango</a>
+            <a
+              href="https://github.com/agoodway/tango"
+              target="_blank"
+              class="link link-primary font-medium"
+            >
+              Tango
+            </a>
             handles the OAuth dance between third-party services and Phoenix.
           </p>
         </div>
+
+        <%= if error = Phoenix.Flash.get(@flash, :error) do %>
+          <div role="alert" class="alert alert-error mb-6">
+            <span>{error}</span>
+          </div>
+        <% end %>
 
         <div class="grid lg:grid-cols-3 gap-6">
           <%!-- Left Panel: Connect --%>
@@ -42,21 +59,27 @@ defmodule DemoWeb.DemoLive do
               <div class="card-body">
                 <div>
                   <%= if @connected_provider do %>
-                    <button type="button" class="btn btn-lg w-full gap-3 border-none text-base font-medium btn-success text-white" disabled>
+                    <button
+                      type="button"
+                      class="btn btn-lg w-full gap-3 border-none text-base font-medium btn-success text-white"
+                      disabled
+                    >
                       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 16 16">
                         <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
                       </svg>
                       Connected to GitHub
                     </button>
-
                   <% else %>
                     <.live_component
                       module={OAuthComponent}
                       id="github-oauth"
                       provider="github"
                       tenant_id={@tenant_id}
-                      scopes={["user:email", "repo"]}
+                      scopes={Demo.GithubConnect.scopes()}
                       callback_url={callback_url()}
+                      completion_origin={completion_origin()}
+                      expected_connection_id={@expected_connection_id}
+                      expected_subject={@expected_subject}
                       on_connect="oauth_connected"
                       on_error="oauth_error"
                       button_class="btn btn-lg w-full gap-3 text-white border-none text-base font-medium [background-color:#24292e] hover:[background-color:#1b1f23]"
@@ -70,7 +93,6 @@ defmodule DemoWeb.DemoLive do
                 </div>
               </div>
             </div>
-
           </div>
 
           <%!-- Right Panel: Tango Logs + Profile + Repos --%>
@@ -155,37 +177,28 @@ defmodule DemoWeb.DemoLive do
     """
   end
 
+  # The component hands over an opaque completion handle. Verification and
+  # finalization happen here on the server, scoped to this socket's tenant.
+  # Both call GitHub, so they run in a task rather than blocking the LiveView.
   @impl true
-  def handle_info({"oauth_connected", %{token: token, provider: provider}}, socket) do
-    socket =
-      socket
-      |> assign(:connected_provider, provider)
-      |> assign(:loading_profile, true)
-      |> load_tango_data()
+  def handle_info({"oauth_connected", message}, socket) do
+    case completion_params(message) do
+      {:ok, handle, intent_reference} ->
+        tenant_id = socket.assigns.tenant_id
+        expected_connection_id = socket.assigns.expected_connection_id
 
-    send(self(), {:fetch_github_profile, token})
-    {:noreply, socket}
-  end
+        {:noreply,
+         start_async(socket, :complete_connection, fn ->
+           Demo.GithubConnect.complete(
+             handle,
+             intent_reference,
+             tenant_id,
+             expected_connection_id
+           )
+         end)}
 
-  @impl true
-  def handle_info({:fetch_github_profile, token}, socket) do
-    case Demo.GithubClient.fetch_profile(token) do
-      {:ok, %{user: user, repos: repos}} ->
-        socket =
-          socket
-          |> assign(:github_user, user)
-          |> assign(:github_repos, repos)
-          |> assign(:loading_profile, false)
-
-        {:noreply, socket}
-
-      {:error, _reason} ->
-        socket =
-          socket
-          |> assign(:loading_profile, false)
-          |> put_flash(:error, "Failed to fetch GitHub profile")
-
-        {:noreply, socket}
+      :error ->
+        {:noreply, connection_not_verified(socket)}
     end
   end
 
@@ -202,6 +215,74 @@ defmodule DemoWeb.DemoLive do
   # OAuthComponent sends real-time log messages; we display DB audit logs instead
   @impl true
   def handle_info({:tango_log, _}, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_async(:complete_connection, {:ok, {:ok, connection}}, socket) do
+    tenant_id = socket.assigns.tenant_id
+
+    socket =
+      socket
+      |> assign(:connected_provider, Demo.GithubConnect.provider())
+      |> assign(:loading_profile, true)
+      |> load_tango_data()
+      |> start_async(:fetch_github_profile, fn ->
+        fetch_github_profile(connection.id, tenant_id)
+      end)
+
+    {:noreply, socket}
+  end
+
+  def handle_async(:complete_connection, _failed, socket),
+    do: {:noreply, connection_not_verified(socket)}
+
+  def handle_async(:fetch_github_profile, {:ok, {:ok, %{user: user, repos: repos}}}, socket) do
+    socket =
+      socket
+      |> assign(:github_user, user)
+      |> assign(:github_repos, repos)
+      |> assign(:loading_profile, false)
+
+    {:noreply, socket}
+  end
+
+  def handle_async(:fetch_github_profile, _failed, socket) do
+    socket =
+      socket
+      |> assign(:loading_profile, false)
+      |> put_flash(:error, "Failed to fetch GitHub profile")
+
+    {:noreply, socket}
+  end
+
+  defp connection_not_verified(socket) do
+    socket
+    |> load_tango_data()
+    |> put_flash(:error, "OAuth connection could not be verified")
+  end
+
+  defp fetch_github_profile(connection_id, tenant_id) do
+    with {:ok, connection} <-
+           Tango.get_active_connection(connection_id, tenant_id, auto_refresh: true) do
+      connection
+      |> Connection.get_raw_access_token()
+      |> Demo.GithubClient.fetch_profile()
+    end
+  end
+
+  @completion_keys [:provider, :tenant_id, :completion_handle, :intent_reference]
+
+  # Accepts only the component's credential-free completion shape. A message
+  # with any other key (such as access_token) is rejected before verification.
+  defp completion_params(
+         %{completion_handle: handle, intent_reference: intent_reference} = message
+       )
+       when is_binary(handle) and is_binary(intent_reference) do
+    if Enum.all?(Map.keys(message), &(&1 in @completion_keys)),
+      do: {:ok, handle, intent_reference},
+      else: :error
+  end
+
+  defp completion_params(_message), do: :error
 
   defp load_tango_data(socket) do
     tenant_id = socket.assigns.tenant_id
@@ -234,7 +315,25 @@ defmodule DemoWeb.DemoLive do
     |> Enum.sort_by(& &1.occurred_at)
   end
 
+  defp assign_expected_connection(socket) do
+    case Tango.get_connection_for_provider(
+           Demo.GithubConnect.provider(),
+           socket.assigns.tenant_id
+         ) do
+      {:ok, connection} ->
+        socket
+        |> assign(:expected_connection_id, connection.id)
+        |> assign(:expected_subject, connection.account_subject)
+
+      _ ->
+        socket
+    end
+  end
+
   defp callback_url do
     DemoWeb.Endpoint.url() <> "/api/oauth/callback"
   end
+
+  # Exact origin of this page; the callback page posts the completion here only.
+  defp completion_origin, do: Tango.Validation.origin(DemoWeb.Endpoint.url())
 end

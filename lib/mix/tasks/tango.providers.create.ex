@@ -10,9 +10,10 @@ defmodule Mix.Tasks.Tango.Providers.Create do
 
       --client-id ID        OAuth2 client ID
       --client-secret SECRET OAuth2 client secret
-      --api-key KEY         API key for API_KEY providers
       --scope SCOPE         Single OAuth2 scope (can be specified multiple times)
       --scopes SCOPES       Comma-separated list of OAuth2 scopes
+      --auth-url URL        Authorization URL (overrides the catalog value)
+      --token-url URL       Token URL (overrides the catalog value)
 
   ## Examples
 
@@ -24,11 +25,21 @@ defmodule Mix.Tasks.Tango.Providers.Create do
       mix tango.providers.create google --client-id=xxx --client-secret=yyy --scope=https://www.googleapis.com/auth/calendar --scope=https://www.googleapis.com/auth/userinfo.email
       mix tango.providers.create google --client-id=xxx --client-secret=yyy --scopes="https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/userinfo.email"
 
-      # Create API key provider
-      mix tango.providers.create stripe --api-key=sk_live_xxx
+      # Provider whose catalog URLs need connection configuration
+      mix tango.providers.create zendesk --client-id=xxx --client-secret=yyy \\
+        --auth-url=https://acme.zendesk.com/oauth/authorizations/new \\
+        --token-url=https://acme.zendesk.com/oauth/tokens
 
   This command fetches the provider configuration from the Nango catalog
-  and creates a ready-to-use provider with your credentials.
+  (resolving `alias:` entries through their parent) and creates a
+  ready-to-use provider with your credentials.
+
+  Catalog URLs with a `a || b` template use the alternative Nango uses without
+  connection configuration. URLs that still need `${connectionConfig.*}`
+  values are rejected unless you pass `--auth-url` and `--token-url`.
+
+  Only OAuth2 providers are supported. `--api-key` is rejected with an error:
+  Tango has no API-key connection flow, so the key would otherwise be dropped.
   """
 
   use Mix.Task
@@ -42,7 +53,9 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     client_secret: :string,
     api_key: :string,
     scope: :keep,
-    scopes: :string
+    scopes: :string,
+    auth_url: :string,
+    token_url: :string
   ]
 
   @doc "Runs the mix task."
@@ -52,11 +65,11 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     ProviderHelper.ensure_repo_started()
 
     cond do
+      Keyword.has_key?(opts, :api_key) ->
+        reject_api_key(provider_name)
+
       opts[:client_id] && opts[:client_secret] ->
         create_oauth2_provider(provider_name, opts)
-
-      opts[:api_key] ->
-        create_api_key_provider(provider_name, opts)
 
       true ->
         ProviderHelper.display_create_usage(provider_name)
@@ -78,9 +91,13 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     end
   end
 
-  defp handle_oauth2_config(provider_name, %{"auth_mode" => "API_KEY"}, _opts) do
-    Shell.error("Error: Provider '#{provider_name}' uses API key authentication")
-    Shell.info("   Use: mix tango.providers.create #{provider_name} --api-key=xxx")
+  defp handle_oauth2_config(provider_name, %{"auth_mode" => mode}, _opts)
+       when is_binary(mode) and mode != "OAUTH2" do
+    Shell.error(
+      "Error: Provider '#{provider_name}' uses #{mode} authentication, which Tango does not support"
+    )
+
+    Shell.info("   Tango only supports OAUTH2 (authorization code) providers.")
   end
 
   defp handle_oauth2_config(provider_name, nango_config, opts) do
@@ -89,11 +106,27 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     case Tango.Provider.create_provider_from_nango(provider_name, nango_config,
            client_id: opts[:client_id],
            client_secret: opts[:client_secret],
-           default_scopes: combined_scopes
+           default_scopes: combined_scopes,
+           auth_url: opts[:auth_url],
+           token_url: opts[:token_url]
          ) do
       {:ok, provider} -> ProviderHelper.display_provider_success(provider, "OAuth2")
-      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
+      {:error, changeset} -> display_creation_error(changeset)
     end
+  end
+
+  defp display_creation_error(changeset) do
+    ProviderHelper.display_creation_error(changeset)
+
+    if connection_config_error?(changeset) do
+      Shell.info("   Pass the provider's URLs explicitly with --auth-url=... --token-url=...")
+    end
+  end
+
+  defp connection_config_error?(changeset) do
+    Enum.any?(changeset.errors, fn {_field, {message, _opts}} ->
+      String.contains?(message, "requires connection configuration")
+    end)
   end
 
   defp handle_oauth2_not_found(provider_name) do
@@ -107,51 +140,15 @@ defmodule Mix.Tasks.Tango.Providers.Create do
     end
   end
 
-  defp create_api_key_provider(provider_name, opts) do
-    Shell.info("📡 Checking provider configuration for '#{provider_name}'...")
-
-    case Tango.Catalog.get_provider(provider_name) do
-      {:ok, nango_config} -> handle_api_key_config(provider_name, nango_config, opts)
-      {:error, :not_found} -> handle_api_key_not_found(provider_name, opts)
-      {:error, reason} -> Shell.error("Failed to fetch catalog: #{inspect(reason)}")
-    end
-  end
-
-  defp handle_api_key_config(provider_name, %{"auth_mode" => auth_mode}, opts)
-       when auth_mode != "API_KEY" do
-    Shell.error("Error: Provider '#{provider_name}' uses OAuth2 authentication")
-
-    Shell.info(
-      "   Use: mix tango.providers.create #{provider_name} --client-id=xxx --client-secret=yyy"
+  defp reject_api_key(provider_name) do
+    Shell.error(
+      "Error: API key providers are not supported; Tango only supports OAuth2 providers."
     )
 
-    opts
-  end
+    Shell.info("   No provider was created and the API key was not stored.")
 
-  defp handle_api_key_config(provider_name, nango_config, opts) do
-    config_with_credentials = put_in(nango_config, ["api_key"], opts[:api_key])
-
-    case Tango.Provider.create_provider_from_nango(provider_name, config_with_credentials) do
-      {:ok, provider} -> ProviderHelper.display_provider_success(provider, "API Key")
-      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
-    end
-  end
-
-  defp handle_api_key_not_found(provider_name, opts) do
-    Shell.info("Provider not found in catalog, creating simple API key provider...")
-
-    config = %{
-      name: provider_name,
-      display_name: String.capitalize(provider_name),
-      config: %{
-        "auth_mode" => "API_KEY",
-        "api_key" => opts[:api_key]
-      }
-    }
-
-    case Tango.Provider.create_provider(config) do
-      {:ok, provider} -> ProviderHelper.display_provider_success(provider, "API Key (Simple)")
-      {:error, changeset} -> ProviderHelper.display_creation_error(changeset)
-    end
+    Shell.info(
+      "   For OAuth2: mix tango.providers.create #{provider_name} --client-id=xxx --client-secret=yyy"
+    )
   end
 end

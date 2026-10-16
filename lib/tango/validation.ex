@@ -6,6 +6,8 @@ defmodule Tango.Validation do
   security vulnerabilities and ensure data integrity.
   """
 
+  @reserved_auth_params ~w(state redirect_uri client_id response_type scope code_challenge code_challenge_method)
+
   @doc """
   Validates tenant ID format and security.
 
@@ -172,6 +174,84 @@ defmodule Tango.Validation do
   """
   def validate_optional_redirect_uri(nil), do: :ok
   def validate_optional_redirect_uri(uri), do: validate_redirect_uri(uri)
+
+  @doc """
+  Validates that a completion origin is an exact server-configured web origin.
+  """
+  def validate_completion_origin(origin) when is_binary(origin) do
+    allowed_origins = Application.get_env(:tango, :allowed_completion_origins, [])
+
+    with :ok <- validate_origin_shape(origin),
+         true <- origin in allowed_origins do
+      :ok
+    else
+      _ -> {:error, :invalid_completion_origin}
+    end
+  end
+
+  def validate_completion_origin(_), do: {:error, :invalid_completion_origin}
+
+  @doc """
+  Returns the exact web origin (`scheme://host[:port]`) of a URL, or `nil` when
+  it has no scheme and host.
+
+  The default port for the scheme is omitted, matching how browsers report
+  `window.location.origin` and `MessageEvent.origin`. Use it to derive a
+  `completion_origin` from an endpoint URL.
+
+  ## Examples
+
+      iex> Tango.Validation.origin("https://app.example.com/api/oauth/callback")
+      "https://app.example.com"
+
+      iex> Tango.Validation.origin("http://localhost:4000/")
+      "http://localhost:4000"
+
+  """
+  @spec origin(String.t() | nil) :: String.t() | nil
+  def origin(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port}
+      when is_binary(scheme) and is_binary(host) and host != "" ->
+        host = if String.contains?(host, ":"), do: "[#{host}]", else: host
+
+        if port in [nil, URI.default_port(scheme)],
+          do: "#{scheme}://#{host}",
+          else: "#{scheme}://#{host}:#{port}"
+
+      _ ->
+        nil
+    end
+  end
+
+  def origin(_url), do: nil
+
+  @doc """
+  Rejects caller authorization parameters owned by the OAuth protocol flow.
+  """
+  def validate_auth_params(params) when is_map(params) do
+    normalized =
+      Map.new(params, fn
+        {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+        pair -> pair
+      end)
+
+    cond do
+      Enum.any?(@reserved_auth_params, &Map.has_key?(normalized, &1)) ->
+        {:error, :reserved_auth_parameter}
+
+      Enum.all?(normalized, fn {key, value} ->
+        is_binary(key) and key != "" and
+            (is_binary(value) or is_number(value) or is_boolean(value))
+      end) ->
+        {:ok, normalized}
+
+      true ->
+        {:error, :invalid_auth_params}
+    end
+  end
+
+  def validate_auth_params(_), do: {:error, :invalid_auth_params}
 
   @doc """
   Validates OAuth scopes list.
@@ -369,4 +449,44 @@ defmodule Tango.Validation do
   end
 
   def validate_oauth_options(_), do: {:error, :invalid_oauth_options}
+
+  @doc """
+  Splits a provider scope string on whitespace or commas.
+
+  GitHub and some others return comma-separated scopes; OAuth2 commonly uses
+  spaces. Empty segments are dropped.
+  """
+  def parse_scopes(scopes) when is_binary(scopes),
+    do: String.split(scopes, ~r/[\s,]+/, trim: true)
+
+  def parse_scopes(scopes) when is_list(scopes), do: scopes
+  def parse_scopes(_), do: []
+
+  defp validate_origin_shape(origin) do
+    case {String.contains?(origin, "*"), URI.parse(origin)} do
+      {true, _uri} ->
+        {:error, :invalid_completion_origin}
+
+      {false,
+       %URI{
+         scheme: scheme,
+         host: host,
+         userinfo: nil,
+         path: path,
+         query: nil,
+         fragment: nil
+       }}
+      when is_binary(host) and path in [nil, ""] ->
+        cond do
+          scheme == "https" -> :ok
+          scheme == "http" and localhost?(host) -> :ok
+          true -> {:error, :invalid_completion_origin}
+        end
+
+      _ ->
+        {:error, :invalid_completion_origin}
+    end
+  end
+
+  defp localhost?(host), do: host in ["localhost", "127.0.0.1", "::1"]
 end

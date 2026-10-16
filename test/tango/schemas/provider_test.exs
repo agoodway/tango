@@ -250,6 +250,174 @@ defmodule Tango.Schemas.ProviderTest do
     end
   end
 
+  describe "from_nango_config/3 with catalog templates" do
+    @salesforce %{
+      "display_name" => "Salesforce",
+      "auth_mode" => "OAUTH2",
+      "authorization_url" =>
+        "https://${connectionConfig.hostname}/services/oauth2/authorize || https://login.salesforce.com/services/oauth2/authorize",
+      "token_url" =>
+        "https://${connectionConfig.hostname}/services/oauth2/token || https://login.salesforce.com/services/oauth2/token"
+    }
+
+    @zendesk %{
+      "display_name" => "Zendesk",
+      "auth_mode" => "OAUTH2",
+      "authorization_url" =>
+        "https://${connectionConfig.subdomain}.zendesk.com/oauth/authorizations/new",
+      "token_url" => "https://${connectionConfig.subdomain}.zendesk.com/oauth/tokens"
+    }
+
+    @creds [client_id: "id", client_secret: "secret"]
+
+    test "uses the fallback Nango picks when no connection config is given" do
+      changeset = Provider.from_nango_config("salesforce", @salesforce, @creds)
+
+      assert changeset.valid?
+      config = get_change(changeset, :config)
+      assert config["auth_url"] == "https://login.salesforce.com/services/oauth2/authorize"
+      assert config["token_url"] == "https://login.salesforce.com/services/oauth2/token"
+    end
+
+    test "rejects URLs that still need connection configuration" do
+      changeset = Provider.from_nango_config("zendesk", @zendesk, @creds)
+
+      refute changeset.valid?
+
+      assert Enum.any?(
+               errors_on(changeset).config,
+               &(&1 =~ "requires connection configuration, which Tango does not support")
+             )
+    end
+
+    test "rejects a fallback that itself needs connection configuration" do
+      zoho = %{
+        "auth_mode" => "OAUTH2",
+        "authorization_url" =>
+          "https://accounts.zoho.${connectionConfig.extension}/oauth/v2/auth || https://accounts.zoho.com/oauth/v2/auth",
+        "token_url" =>
+          "https://accounts.zoho.${connectionConfig.extension}/oauth/v2/token || ${connectionConfig.accounts-server}/oauth/v2/token"
+      }
+
+      changeset = Provider.from_nango_config("zoho", zoho, @creds)
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).config, &(&1 =~ "token_url requires connection"))
+    end
+
+    test "explicit auth_url and token_url overrides replace templated catalog URLs" do
+      opts =
+        @creds ++
+          [
+            auth_url: "https://acme.zendesk.com/oauth/authorizations/new",
+            token_url: "https://acme.zendesk.com/oauth/tokens"
+          ]
+
+      changeset = Provider.from_nango_config("zendesk", @zendesk, opts)
+
+      assert changeset.valid?
+      config = get_change(changeset, :config)
+      assert config["auth_url"] == "https://acme.zendesk.com/oauth/authorizations/new"
+      assert config["token_url"] == "https://acme.zendesk.com/oauth/tokens"
+    end
+
+    test "rejects templated authorization or token params" do
+      config =
+        Map.put(@salesforce, "token_params", %{"resource" => "https://${connectionConfig.env}"})
+
+      changeset = Provider.from_nango_config("dataverse", config, @creds)
+
+      refute changeset.valid?
+
+      assert Enum.any?(
+               errors_on(changeset).metadata,
+               &(&1 =~ "token_params requires connection configuration")
+             )
+    end
+  end
+
+  describe "from_nango_config/3 auth modes" do
+    test "rejects non-OAuth2 auth modes" do
+      for mode <- ~w(APP API_KEY OAUTH1 OAUTH2_CC MCP_OAUTH2 JWT BASIC) do
+        nango_config = %{
+          "auth_mode" => mode,
+          "authorization_url" => "https://example.com/authorize",
+          "token_url" => "https://example.com/token"
+        }
+
+        changeset =
+          Provider.from_nango_config("p", nango_config, client_id: "id", client_secret: "s")
+
+        refute changeset.valid?, "#{mode} should be rejected"
+
+        assert Enum.any?(
+                 errors_on(changeset).config,
+                 &(&1 =~ "auth_mode #{mode} is not supported; Tango only supports OAUTH2")
+               )
+      end
+    end
+
+    test "manual providers with a lowercase oauth2 mode or no mode remain valid" do
+      for config <- [%{"auth_mode" => "oauth2"}, %{}] do
+        attrs = %{
+          slug: "manual",
+          name: "Manual",
+          client_secret: "s",
+          config:
+            Map.merge(config, %{
+              "client_id" => "id",
+              "auth_url" => "https://example.com/authorize",
+              "token_url" => "https://example.com/token"
+            })
+        }
+
+        assert Provider.changeset(%Provider{}, attrs).valid?
+      end
+    end
+  end
+
+  describe "catalog_metadata/1" do
+    test "records the token and authorization request options Tango honors" do
+      metadata =
+        Provider.catalog_metadata(%{
+          "scope_separator" => ",",
+          "disable_pkce" => true,
+          "token_request_auth_method" => "basic",
+          "authorization_method" => "header",
+          "body_format" => "json",
+          "authorization_params" => %{"prompt" => "consent"},
+          "token_params" => %{"grant_type" => "authorization_code", "audience" => "api"},
+          "refresh_params" => %{"grant_type" => "refresh_token"}
+        })
+
+      assert metadata["scope_separator"] == ","
+      assert metadata["disable_pkce"] == true
+      assert metadata["token_request_auth_method"] == "basic"
+      assert metadata["authorization_method"] == "header"
+      assert metadata["body_format"] == "json"
+      assert metadata["auth_params"] == %{"prompt" => "consent"}
+
+      assert metadata["token_params"] == %{
+               "grant_type" => "authorization_code",
+               "audience" => "api"
+             }
+
+      assert metadata["refresh_params"] == %{"grant_type" => "refresh_token"}
+    end
+
+    test "defaults to Nango's defaults when the catalog omits the options" do
+      metadata = Provider.catalog_metadata(%{})
+
+      assert metadata["scope_separator"] == " "
+      assert metadata["disable_pkce"] == false
+      assert metadata["token_request_auth_method"] == nil
+      assert metadata["authorization_method"] == nil
+      assert metadata["body_format"] == nil
+      assert metadata["token_params"] == %{}
+      assert metadata["refresh_params"] == %{}
+    end
+  end
+
   # Helper function to extract errors (similar to Phoenix's errors_on/1)
   defp errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {message, opts} ->

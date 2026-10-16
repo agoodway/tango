@@ -1,6 +1,6 @@
 defmodule Mix.Tasks.Tango.Providers.Sync do
   @moduledoc """
-  Synchronizes all providers from the Nango catalog to local database.
+  Refreshes locally configured providers from the Nango catalog.
 
   ## Usage
 
@@ -8,28 +8,42 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
 
   ## Options
 
-      --only PROVIDERS      Sync only specified providers (comma-separated)
+      --only PROVIDERS      Sync only specified providers (comma-separated slugs)
       --dry-run, -n         Preview changes without applying them
-      --force, -f           Force update existing provider configurations
-      --update-metadata     Update display names and metadata only
+      --force, -f           Merge catalog endpoints (auth_url, token_url, auth_mode)
+                            into existing provider configs
+      --update-metadata     Update display names and catalog metadata
 
   ## Examples
 
       mix tango.providers.sync
       mix tango.providers.sync --only github,slack
-      mix tango.providers.sync --dry-run
-      mix tango.providers.sync --force
+      mix tango.providers.sync --dry-run --force
+      mix tango.providers.sync --force --update-metadata
 
-  This command will fetch the Nango provider catalog and create provider
-  templates in the local database. Existing providers are preserved unless
-  --force is used.
+  ## Behaviour
+
+  Local providers are matched to catalog entries by `slug` (the catalog key),
+  including inactive providers. Sync never creates providers: a provider is
+  only usable with OAuth credentials, so catalog entries that are not yet
+  configured are listed with a hint to run `mix tango.providers.create`.
+
+  Without `--force` or `--update-metadata` nothing is written. `--force` merges
+  the catalog's endpoint fields into the existing `config`, keeping
+  `client_id`, any custom keys, and `client_secret` untouched; catalog values
+  that are missing or templated (`${...}` placeholders, including `a || b`
+  fallbacks) are skipped so resolved or overridden local URLs are not
+  replaced. `alias:` entries are resolved through their parent first. `--update-metadata` sets `name` from the
+  catalog display name and merges catalog metadata into `metadata`. Neither
+  option changes `active`, `default_scopes`, or credentials.
   """
 
   use Mix.Task
   alias Mix.Shell.IO, as: Shell
   alias Mix.Tasks.Helpers.{ProviderHelper, TaskHelper}
+  alias Tango.Schemas.Provider, as: ProviderSchema
 
-  @shortdoc "Syncs providers from Nango catalog to database"
+  @shortdoc "Refreshes configured providers from the Nango catalog"
 
   @switches [
     only: :string,
@@ -53,7 +67,7 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
     case Tango.Catalog.get_catalog() do
       {:ok, catalog} ->
         filtered_catalog = filter_catalog(catalog, opts)
-        local_providers = get_local_providers()
+        local_providers = Tango.Provider.list_all_providers()
 
         changes = analyze_changes(filtered_catalog, local_providers, opts)
 
@@ -61,12 +75,12 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
         Shell.info("Analyzing local database (#{length(local_providers)} providers configured)")
         Shell.info("")
 
-        display_changes(changes)
+        display_changes(changes, opts)
 
         if opts[:dry_run] do
           Shell.info("🔍 Dry run completed - no changes applied")
         else
-          apply_changes(changes, opts)
+          apply_changes(changes)
         end
 
       {:error, reason} ->
@@ -89,142 +103,135 @@ defmodule Mix.Tasks.Tango.Providers.Sync do
     end
   end
 
-  defp get_local_providers do
-    Tango.Provider.list_all_providers()
-  end
-
   defp analyze_changes(catalog, local_providers, opts) do
-    local_names = MapSet.new(local_providers, & &1.name)
-    catalog_names = MapSet.new(Map.keys(catalog))
+    local_by_slug = Map.new(local_providers, &{&1.slug, &1})
 
-    new_providers =
-      MapSet.difference(catalog_names, local_names)
-      |> MapSet.to_list()
-      |> Enum.map(fn name -> {name, catalog[name]} end)
+    {configured, available} =
+      catalog
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.split_with(fn {slug, _config} -> Map.has_key?(local_by_slug, slug) end)
 
-    updated_providers =
-      if opts[:force] or opts[:update_metadata] do
-        MapSet.intersection(catalog_names, local_names)
-        |> MapSet.to_list()
-        |> Enum.map(fn name ->
-          local = Enum.find(local_providers, &(&1.name == name))
-          {name, catalog[name], local}
-        end)
-      else
-        []
-      end
-
-    preserved_providers =
-      local_providers
-      |> Enum.reject(fn provider -> provider.name in catalog_names end)
+    updates =
+      configured
+      |> Enum.map(fn {slug, config} ->
+        local = Map.fetch!(local_by_slug, slug)
+        {slug, local, build_update_attrs(config, local, opts)}
+      end)
+      |> Enum.reject(fn {_slug, _local, attrs} -> attrs == %{} end)
 
     %{
-      new_providers: new_providers,
-      updated_providers: updated_providers,
-      preserved_providers: preserved_providers
+      configured: Enum.map(configured, &elem(&1, 0)),
+      available: Enum.map(available, &elem(&1, 0)),
+      updates: updates,
+      preserved: Enum.reject(local_providers, &Map.has_key?(catalog, &1.slug))
     }
   end
 
-  defp display_changes(changes) do
-    if changes.new_providers != [] do
-      Shell.info("New providers available:")
-      Enum.each(changes.new_providers, &display_new_provider/1)
+  defp build_update_attrs(catalog_config, local, opts) do
+    %{}
+    |> maybe_merge_endpoints(catalog_config, local, opts[:force])
+    |> maybe_update_metadata(catalog_config, local, opts[:update_metadata])
+  end
+
+  # Catalog fields behind each endpoint key. A templated catalog value (`${...}`,
+  # including `a || b` fallbacks) is never merged: the local URL may be a
+  # deliberate override such as a customer-specific hostname.
+  @endpoint_sources %{"auth_url" => "authorization_url", "token_url" => "token_url"}
+
+  defp maybe_merge_endpoints(attrs, catalog_config, local, true) do
+    endpoints =
+      catalog_config
+      |> ProviderSchema.catalog_endpoints()
+      |> Map.filter(fn {key, value} ->
+        concrete_value?(value) and concrete_source?(catalog_config, key)
+      end)
+
+    merged = Map.merge(local.config || %{}, endpoints)
+    put_if_changed(attrs, :config, merged, local.config)
+  end
+
+  defp maybe_merge_endpoints(attrs, _catalog_config, _local, _force), do: attrs
+
+  defp maybe_update_metadata(attrs, catalog_config, local, true) do
+    metadata = Map.merge(local.metadata || %{}, ProviderSchema.catalog_metadata(catalog_config))
+
+    attrs
+    |> put_if_changed(:metadata, metadata, local.metadata)
+    |> put_name(catalog_config["display_name"], local.name)
+  end
+
+  defp maybe_update_metadata(attrs, _catalog_config, _local, _update), do: attrs
+
+  defp put_name(attrs, name, current) when is_binary(name) and name != "",
+    do: put_if_changed(attrs, :name, name, current)
+
+  defp put_name(attrs, _name, _current), do: attrs
+
+  defp put_if_changed(attrs, _key, value, value), do: attrs
+  defp put_if_changed(attrs, key, value, _current), do: Map.put(attrs, key, value)
+
+  defp concrete_source?(catalog_config, key) do
+    case Map.fetch(@endpoint_sources, key) do
+      {:ok, source} -> concrete_value?(catalog_config[source])
+      :error -> true
+    end
+  end
+
+  defp concrete_value?(value) when is_binary(value), do: not String.contains?(value, "${")
+  defp concrete_value?(_value), do: false
+
+  defp display_changes(changes, opts) do
+    if changes.available != [] do
+      Shell.info(
+        "#{length(changes.available)} catalog providers are not configured (sync does not create providers)."
+      )
+
+      if opts[:only], do: Enum.each(changes.available, &Shell.info("   - #{&1}"))
+
+      Shell.info(
+        "   Configure one with: mix tango.providers.create <name> --client-id=xxx --client-secret=yyy"
+      )
+
       Shell.info("")
     end
 
-    if changes.updated_providers != [] do
+    if changes.updates != [] do
       Shell.info("Providers to update:")
 
-      Enum.each(changes.updated_providers, fn {name, _config, _local} ->
-        Shell.info("🔄 #{name}")
+      Enum.each(changes.updates, fn {slug, _local, attrs} ->
+        Shell.info("🔄 #{slug} (#{attrs |> Map.keys() |> Enum.join(", ")})")
       end)
 
       Shell.info("")
     end
 
-    if changes.preserved_providers != [] do
-      Shell.info("Local providers preserved: #{length(changes.preserved_providers)}")
+    if changes.preserved != [] do
+      Shell.info("Local providers not in catalog (preserved): #{length(changes.preserved)}")
       Shell.info("")
     end
   end
 
-  defp display_new_provider({name, config}) do
-    categories = config["categories"] || []
-    category_text = if categories != [], do: " (#{Enum.join(categories, ", ")})", else: ""
-    Shell.info("OK: #{name}#{category_text}")
-  end
-
-  defp apply_changes(changes, opts) do
-    success_count = apply_new_providers(changes.new_providers)
-    update_count = apply_updates(changes.updated_providers, opts)
+  defp apply_changes(changes) do
+    update_count = changes.updates |> Enum.map(&apply_update/1) |> Enum.sum()
 
     Shell.info("")
 
     Shell.info(
-      "Sync complete: #{success_count} added, #{update_count} updated, #{length(changes.preserved_providers)} preserved"
+      "Sync complete: #{update_count} updated, #{length(changes.configured)} configured, " <>
+        "#{length(changes.available)} not configured, #{length(changes.preserved)} preserved"
     )
   end
 
-  defp apply_new_providers([]), do: 0
-
-  defp apply_new_providers(new_providers) do
-    Shell.info("Syncing #{length(new_providers)} new providers...")
-    new_providers |> Enum.map(&create_new_provider/1) |> Enum.sum()
-  end
-
-  defp create_new_provider({name, config}) do
-    case Tango.Provider.create_provider_from_nango(name, config) do
+  defp apply_update({slug, local, attrs}) do
+    case Tango.Provider.update_provider(local, attrs) do
       {:ok, _provider} ->
-        Shell.info("OK: Created #{name} provider template")
+        Shell.info("🔄 Updated #{slug}")
         1
 
       {:error, changeset} ->
-        Shell.error("Error: Failed to create #{name}:")
+        Shell.error("Error: Failed to update #{slug}:")
         ProviderHelper.print_changeset_errors(changeset)
         0
-    end
-  end
-
-  defp apply_updates([], _opts), do: 0
-
-  defp apply_updates(updated_providers, opts) do
-    Shell.info("Updating #{length(updated_providers)} existing providers...")
-    updated_providers |> Enum.map(&update_single_provider(&1, opts)) |> Enum.sum()
-  end
-
-  defp update_single_provider({name, config, local_provider}, opts) do
-    update_attrs = build_update_attrs(config, local_provider, opts)
-
-    case Tango.Provider.update_provider(local_provider, update_attrs) do
-      {:ok, _provider} ->
-        Shell.info("🔄 Updated #{name}")
-        1
-
-      {:error, changeset} ->
-        Shell.error("Error: Failed to update #{name}:")
-        ProviderHelper.print_changeset_errors(changeset)
-        0
-    end
-  end
-
-  defp build_update_attrs(config, _local_provider, opts) do
-    base_attrs = %{}
-
-    base_attrs =
-      if opts[:update_metadata] do
-        Map.merge(base_attrs, %{
-          display_name: config["display_name"]
-          # Note: We don't update config to preserve credentials
-        })
-      else
-        base_attrs
-      end
-
-    if opts[:force] do
-      # Force update overwrites config but preserves credentials
-      Map.put(base_attrs, :config, config)
-    else
-      base_attrs
     end
   end
 end

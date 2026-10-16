@@ -4,7 +4,10 @@
  * Manages the OAuth popup window lifecycle:
  * - Opens a centered popup when instructed by the server
  * - Listens for postMessage from the OAuth callback page
- * - Forwards results back to the LiveComponent
+ * - Accepts only messages from the popup window, from the callback page's
+ *   origin, for the intent the server started
+ * - Forwards the opaque completion handle (never a token) back to the
+ *   LiveComponent, which hands it to the authenticated server-side completion
  * - Monitors popup close state
  *
  * Register with LiveSocket:
@@ -14,23 +17,34 @@
 const TangoOAuth = {
   mounted() {
     this.popup = null
+    this.pending = null
     this.pollInterval = null
     this.componentId = this.el.dataset.componentId
 
     this.messageHandler = (event) => {
-      if (!this.popup) return
+      if (!this.popup || !this.pending) return
+      if (event.source !== this.popup) return
+      if (event.origin !== this.pending.callbackOrigin) return
 
       const data = event.data
-      if (!data || !data.type) return
+      if (!data || typeof data !== "object") return
+      if (data.intent_reference !== this.pending.intentReference) return
+
+      const target = `#${this.componentId}`
+      const intentReference = this.pending.intentReference
 
       if (data.type === "oauth_complete") {
-        this.pushEventTo(`#${this.componentId}`, "oauth_complete", {
-          connection: data.connection
+        if (typeof data.completion_handle !== "string" || data.completion_handle === "") return
+
+        this.pushEventTo(target, "oauth_complete", {
+          completion_handle: data.completion_handle,
+          intent_reference: intentReference
         })
         this.cleanup()
       } else if (data.type === "oauth_error") {
-        this.pushEventTo(`#${this.componentId}`, "oauth_error", {
-          error: data.error
+        this.pushEventTo(target, "oauth_error", {
+          error: typeof data.error === "string" ? data.error : "oauth_failed",
+          intent_reference: intentReference
         })
         this.cleanup()
       }
@@ -38,11 +52,16 @@ const TangoOAuth = {
 
     window.addEventListener("message", this.messageHandler)
 
-    this.handleEvent("open_popup", ({ url }) => {
+    this.handleEvent("open_popup", ({ url, intent_reference, callback_origin }) => {
       const width = 600
       const height = 700
       const left = window.screenX + (window.outerWidth - width) / 2
       const top = window.screenY + (window.outerHeight - height) / 2
+
+      this.pending = {
+        intentReference: intent_reference,
+        callbackOrigin: callback_origin
+      }
 
       this.popup = window.open(
         url,
@@ -53,6 +72,8 @@ const TangoOAuth = {
       if (this.popup) {
         this.popup.focus()
         this.startPolling()
+      } else {
+        this.pending = null
       }
     })
   },
@@ -75,6 +96,7 @@ const TangoOAuth = {
       this.popup.close()
     }
     this.popup = null
+    this.pending = null
   },
 
   destroyed() {

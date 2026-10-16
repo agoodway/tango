@@ -19,6 +19,13 @@ defmodule Tango.Schemas.OAuthSession do
           code_verifier: String.t() | nil,
           redirect_uri: String.t() | nil,
           scopes: [String.t()],
+          expected_connection_id: integer() | nil,
+          expected_subject: String.t() | nil,
+          completion_origin: String.t() | nil,
+          intent_reference: String.t() | nil,
+          auth_params: map(),
+          oauth_client_id: String.t() | nil,
+          exchanged_at: DateTime.t() | nil,
           expires_at: DateTime.t() | nil,
           metadata: map(),
           inserted_at: NaiveDateTime.t() | nil,
@@ -37,6 +44,13 @@ defmodule Tango.Schemas.OAuthSession do
     :code_verifier,
     :redirect_uri,
     :scopes,
+    :expected_connection_id,
+    :expected_subject,
+    :completion_origin,
+    :intent_reference,
+    :auth_params,
+    :oauth_client_id,
+    :exchanged_at,
     :expires_at,
     :metadata
   ]
@@ -50,6 +64,13 @@ defmodule Tango.Schemas.OAuthSession do
     field(:code_verifier, :string)
     field(:redirect_uri, :string)
     field(:scopes, {:array, :string}, default: [])
+    field(:expected_connection_id, :integer)
+    field(:expected_subject, :string)
+    field(:completion_origin, :string)
+    field(:intent_reference, :string)
+    field(:auth_params, :map, default: %{})
+    field(:oauth_client_id, :string)
+    field(:exchanged_at, :utc_datetime)
     field(:expires_at, :utc_datetime)
     field(:metadata, :map, default: %{})
 
@@ -74,7 +95,9 @@ defmodule Tango.Schemas.OAuthSession do
     session_token = generate_session_token()
     state = generate_state_token()
     code_verifier = generate_code_verifier()
-    expires_at = DateTime.add(DateTime.utc_now(), session_timeout(), :second)
+
+    expires_at =
+      opts[:expires_at] || DateTime.add(DateTime.utc_now(), session_timeout(), :second)
 
     attrs = %{
       provider_id: provider_id,
@@ -84,6 +107,12 @@ defmodule Tango.Schemas.OAuthSession do
       code_verifier: code_verifier,
       redirect_uri: opts[:redirect_uri],
       scopes: opts[:scopes] || [],
+      expected_connection_id: opts[:expected_connection_id],
+      expected_subject: opts[:expected_subject],
+      completion_origin: opts[:completion_origin],
+      intent_reference: opts[:intent_reference],
+      auth_params: opts[:auth_params] || %{},
+      oauth_client_id: opts[:oauth_client_id],
       expires_at: expires_at,
       metadata: build_session_metadata(opts)
     }
@@ -160,6 +189,7 @@ defmodule Tango.Schemas.OAuthSession do
     opts
     |> Keyword.take([:scopes, :redirect_uri, :ip_address, :user_agent])
     |> Enum.into(%{})
+    |> Map.merge(Keyword.get(opts, :metadata, %{}))
     |> Map.put(:created_at, DateTime.utc_now())
   end
 end

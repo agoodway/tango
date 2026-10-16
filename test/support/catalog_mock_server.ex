@@ -9,7 +9,11 @@ defmodule Tango.CatalogMockServer do
   @doc """
   Sets up mock Nango provider catalog endpoint on the given Bypass server.
 
-  Returns a small, realistic set of providers that match the real Nango structure.
+  Returns a small, realistic set of providers that match the real Nango structure,
+  including the shapes that need special handling: an `alias` entry, an alias
+  that switches to a non-OAuth2 auth mode, `${connectionConfig.*}` placeholders
+  with and without a `||` fallback, `scope_separator`, `disable_pkce`,
+  `token_request_auth_method: basic`, and `authorization_method`/`body_format`.
   """
   def setup_catalog_endpoint(bypass, opts \\ []) do
     should_fail = Keyword.get(opts, :should_fail, false)
@@ -56,10 +60,72 @@ defmodule Tango.CatalogMockServer do
         auth_mode: OAUTH2
         authorization_url: https://accounts.google.com/o/oauth2/auth
         token_url: https://oauth2.googleapis.com/token
+        authorization_params:
+            response_type: code
+            access_type: offline
+            prompt: consent
         default_scopes:
             - https://www.googleapis.com/auth/userinfo.email
             - https://www.googleapis.com/auth/userinfo.profile
         docs: https://docs.nango.dev/integrations/all/google
+
+    # Alias entry: inherits the parent's OAuth2 settings (shallow merge)
+    google-calendar:
+        display_name: Google Calendar
+        alias: google
+        categories:
+            - calendar
+        proxy:
+            base_url: https://www.googleapis.com/calendar
+        docs: https://docs.nango.dev/integrations/all/google-calendar
+
+    # Alias entry that overrides the parent's auth mode (not OAuth2)
+    github-app:
+        display_name: GitHub (App)
+        alias: github
+        auth_mode: APP
+        authorization_url: ${connectionConfig.appPublicLink}/installations/new
+        token_url: https://api.github.com/app/installations/${connectionConfig.installation_id}/access_tokens
+        categories:
+            - dev-tools
+        docs: https://docs.nango.dev/integrations/all/github-app
+
+    # Connection-config placeholders with a "||" fallback
+    salesforce:
+        display_name: Salesforce
+        categories:
+            - marketing
+        auth_mode: OAUTH2
+        authorization_url: https://${connectionConfig.hostname}/services/oauth2/authorize || https://login.salesforce.com/services/oauth2/authorize
+        token_url: https://${connectionConfig.hostname}/services/oauth2/token || https://login.salesforce.com/services/oauth2/token
+        authorization_params:
+            prompt: consent
+        default_scopes:
+            - offline_access
+        docs: https://docs.nango.dev/integrations/all/salesforce
+
+    # Connection-config placeholders with no fallback
+    zendesk:
+        display_name: Zendesk
+        categories:
+            - support
+        auth_mode: OAUTH2
+        authorization_url: https://${connectionConfig.subdomain}.zendesk.com/oauth/authorizations/new
+        token_url: https://${connectionConfig.subdomain}.zendesk.com/oauth/tokens
+        docs: https://docs.nango.dev/integrations/all/zendesk
+
+    # Basic client authentication on the token endpoint
+    figma:
+        display_name: Figma
+        categories:
+            - design
+        auth_mode: OAUTH2
+        authorization_url: https://www.figma.com/oauth
+        token_url: https://api.figma.com/v1/oauth/token
+        token_request_auth_method: basic
+        scope_separator: ','
+        disable_pkce: true
+        docs: https://docs.nango.dev/integrations/all/figma
 
     stripe:
         display_name: Stripe
@@ -78,7 +144,9 @@ defmodule Tango.CatalogMockServer do
             - communication
         auth_mode: OAUTH2
         authorization_url: https://slack.com/oauth/v2/authorize
+        scope_separator: ','
         token_url: https://slack.com/api/oauth.v2.access
+        disable_pkce: true
         default_scopes:
             - chat:write
             - channels:read
@@ -91,6 +159,11 @@ defmodule Tango.CatalogMockServer do
         auth_mode: OAUTH2
         authorization_url: https://api.notion.com/v1/oauth/authorize
         token_url: https://api.notion.com/v1/oauth/token
+        authorization_params:
+            response_type: code
+            owner: user
+        authorization_method: header
+        body_format: json
         default_scopes:
             - read_content
         docs: https://docs.nango.dev/integrations/all/notion

@@ -155,6 +155,31 @@ defmodule Tango.ProviderTest do
   end
 
   describe "create_provider/1" do
+    test "rejects an api_key attribute instead of silently dropping it" do
+      attrs = %{
+        name: "Custom API Key Service",
+        slug: "custom_service",
+        client_secret: "placeholder",
+        config: %{"auth_mode" => "API_KEY"},
+        api_key: "your_api_key"
+      }
+
+      assert {:error, changeset} = Provider.create_provider(attrs)
+      assert {"API key providers are not supported" <> _, _} = changeset.errors[:api_key]
+    end
+
+    test "rejects an api_key stored in plaintext config" do
+      attrs = %{
+        name: "Custom API Key Service",
+        slug: "custom_service",
+        client_secret: "placeholder",
+        config: %{"auth_mode" => "API_KEY", "api_key" => "your_api_key"}
+      }
+
+      assert {:error, changeset} = Provider.create_provider(attrs)
+      assert {"must not contain api_key" <> _, _} = changeset.errors[:config]
+    end
+
     test "creates provider with valid OAuth2 attributes" do
       attrs = %{
         name: "oauth2-create",
@@ -252,7 +277,7 @@ defmodule Tango.ProviderTest do
       assert provider.config["token_url"] == "https://github.com/login/oauth/access_token"
     end
 
-    test "creates provider from nango config with API key" do
+    test "rejects an api_key option instead of silently dropping it" do
       nango_config = %{
         "display_name" => "Stripe",
         "auth_mode" => "API_KEY",
@@ -264,16 +289,53 @@ defmodule Tango.ProviderTest do
         }
       }
 
-      # API key providers still need client_secret for the schema
       opts = [api_key: "sk_test_123", client_secret: "placeholder"]
 
-      assert {:ok, provider} = Provider.create_provider_from_nango("stripe", nango_config, opts)
+      assert {:error, changeset} =
+               Provider.create_provider_from_nango("stripe", nango_config, opts)
 
-      assert provider.name == "Stripe"
-      assert provider.slug == "stripe"
-      assert provider.active == true
-      # Verify basic config structure exists
-      assert is_map(provider.config)
+      assert {"API key providers are not supported" <> _, _} = changeset.errors[:api_key]
+      assert Repo.aggregate(ProviderSchema, :count, :id) == 0
+    end
+
+    test "rejects a non-OAuth2 catalog entry even when no api_key is given" do
+      nango_config = %{"display_name" => "Stripe", "auth_mode" => "API_KEY"}
+
+      assert {:error, changeset} =
+               Provider.create_provider_from_nango("stripe", nango_config,
+                 client_secret: "placeholder"
+               )
+
+      assert {"auth_mode API_KEY is not supported; Tango only supports OAUTH2" <> _, _} =
+               changeset.errors[:config]
+
+      assert Repo.aggregate(ProviderSchema, :count, :id) == 0
+    end
+
+    test "creates a connection-config catalog entry only with explicit URL overrides" do
+      nango_config = %{
+        "display_name" => "Zendesk",
+        "auth_mode" => "OAUTH2",
+        "authorization_url" =>
+          "https://${connectionConfig.subdomain}.zendesk.com/oauth/authorize",
+        "token_url" => "https://${connectionConfig.subdomain}.zendesk.com/oauth/tokens"
+      }
+
+      assert {:error, _changeset} =
+               Provider.create_provider_from_nango("zendesk", nango_config,
+                 client_id: "id",
+                 client_secret: "secret"
+               )
+
+      assert {:ok, provider} =
+               Provider.create_provider_from_nango("zendesk", nango_config,
+                 client_id: "id",
+                 client_secret: "secret",
+                 auth_url: "https://acme.zendesk.com/oauth/authorize",
+                 token_url: "https://acme.zendesk.com/oauth/tokens"
+               )
+
+      assert provider.config["auth_url"] == "https://acme.zendesk.com/oauth/authorize"
     end
 
     test "creates audit log entry on successful creation" do
