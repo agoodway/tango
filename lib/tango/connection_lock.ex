@@ -21,6 +21,24 @@ defmodule Tango.ConnectionLock do
   end
 
   @doc """
+  Locks each provider and tenant pair in provider-id order, then tenant binary order.
+
+  Duplicate pairs are locked once. The caller must already be inside `repo`'s
+  transaction. A repeated call for a held pair does not block, and the locks
+  last until the outer transaction commits or rolls back.
+  """
+  def lock_ordered(repo, keys) when is_list(keys) do
+    keys
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.each(fn {provider_id, tenant_id} ->
+      :ok = lock(repo, provider_id, tenant_id)
+    end)
+
+    :ok
+  end
+
+  @doc """
   Returns whether an active generation other than `excluded_id` exists for one
   provider and tenant. Pass `nil` to check for any active generation.
   """

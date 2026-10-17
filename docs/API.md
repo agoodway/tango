@@ -117,10 +117,14 @@ connections = Tango.list_connections(user_id)
 {:ok, connection} = Tango.get_connection_for_provider("github", user_id)
 headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 
-# With auto-refresh, an expired token that cannot be refreshed returns
-# {:error, {:refresh_failed, reason}}.
+# With auto-refresh, a refresh that cannot fall back to a still-valid active
+# token returns {:error, {:refresh_failed, reason}}. `reason` is a
+# Tango.RefreshError term. Explicit Tango.refresh_connection/1 returns
+# {:error, reason} with no wrapper. See README "Upgrading to 0.3.0".
 {:ok, connection} = Tango.get_connection_for_provider("github", user_id, auto_refresh: true)
 
-# Revoke connection
+# Revoke by struct, or by integer id. A mismatched struct tenant is
+# {:error, :not_authorized}. An unknown id is {:error, :not_found}.
 {:ok, _revoked} = Tango.revoke_connection(connection, user_id)
+{:ok, _revoked} = Tango.revoke_connection(connection.id, user_id)
 ```

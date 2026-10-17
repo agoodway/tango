@@ -10,8 +10,12 @@ defmodule Tango.Connection do
   require Logger
   defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
 
+  alias Tango.ConnectionInfo
   alias Tango.Provider
+  alias Tango.RefreshError
   alias Tango.Schemas.{AuditLog, Connection, Provider}
+
+  @info_statuses [:active, :expired, :revoked]
 
   @doc """
   Lists active connections for a tenant.
@@ -62,6 +66,139 @@ defmodule Tango.Connection do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}
     end
+  end
+
+  @doc """
+  Gets credential-free connection info for any status.
+
+  Missing and wrong-tenant ids both return `{:error, :not_found}`. The read
+  does not refresh tokens or take locks. `:active` does not promise the access
+  token is usable.
+
+  ## Examples
+
+      iex> get_connection_info(123, "user-123")
+      {:ok, %Tango.ConnectionInfo{id: 123, status: :active}}
+
+  """
+  @spec get_connection_info(integer(), String.t()) ::
+          {:ok, ConnectionInfo.t()} | {:error, :not_found}
+  def get_connection_info(connection_id, tenant_id)
+      when is_integer(connection_id) and is_binary(tenant_id) do
+    info =
+      Connection
+      |> join(:inner, [c], p in assoc(c, :provider))
+      |> where([c], c.id == ^connection_id and c.tenant_id == ^tenant_id)
+      |> select_connection_info()
+      |> repo().one()
+
+    case info do
+      nil -> {:error, :not_found}
+      %ConnectionInfo{} = info -> {:ok, info}
+    end
+  end
+
+  @doc """
+  Lists credential-free connection info for a tenant.
+
+  Results are ordered by ascending connection id. `provider_slug` matches the
+  provider slug and includes inactive providers. `status` defaults to
+  `:active`. Pass `:any`, one of `:active`, `:expired`, or `:revoked`, or a
+  list of those statuses. An empty status list returns `[]`. Invalid options
+  raise `ArgumentError` before a query runs.
+
+  The read does not refresh tokens or take locks. `:active` does not promise
+  the access token is usable.
+
+  ## Examples
+
+      iex> list_connection_infos("user-123")
+      [%Tango.ConnectionInfo{}, ...]
+
+      iex> list_connection_infos("user-123", provider_slug: "records", status: :any)
+      [%Tango.ConnectionInfo{}, ...]
+
+  """
+  @spec list_connection_infos(String.t(), keyword()) :: [ConnectionInfo.t()]
+  def list_connection_infos(tenant_id, opts \\ []) when is_binary(tenant_id) and is_list(opts) do
+    opts
+    |> validate_connection_info_opts!()
+    |> query_connection_infos(tenant_id)
+  end
+
+  defp validate_connection_info_opts!(opts) do
+    Enum.each(opts, &validate_connection_info_opt!/1)
+    opts
+  end
+
+  defp validate_connection_info_opt!({:provider_slug, slug}) when is_binary(slug), do: :ok
+
+  defp validate_connection_info_opt!({:status, status}),
+    do: validate_connection_info_status!(status)
+
+  defp validate_connection_info_opt!(option) do
+    raise ArgumentError, "invalid connection info option: #{inspect(option)}"
+  end
+
+  defp validate_connection_info_status!(status)
+       when status in [:active, :expired, :revoked, :any],
+       do: :ok
+
+  defp validate_connection_info_status!(statuses) when is_list(statuses) do
+    if Enum.all?(statuses, &(&1 in @info_statuses)) do
+      :ok
+    else
+      raise ArgumentError, "invalid connection info status: #{inspect(statuses)}"
+    end
+  end
+
+  defp validate_connection_info_status!(status) do
+    raise ArgumentError, "invalid connection info status: #{inspect(status)}"
+  end
+
+  defp query_connection_infos(opts, tenant_id) do
+    case Keyword.get(opts, :status, :active) do
+      [] ->
+        []
+
+      status ->
+        Connection
+        |> join(:inner, [c], p in assoc(c, :provider))
+        |> where([c], c.tenant_id == ^tenant_id)
+        |> filter_connection_info_status(status)
+        |> filter_connection_info_slug(Keyword.get(opts, :provider_slug))
+        |> order_by([c], asc: c.id)
+        |> select_connection_info()
+        |> repo().all()
+    end
+  end
+
+  defp filter_connection_info_status(query, :any), do: query
+
+  defp filter_connection_info_status(query, status) when is_atom(status) do
+    where(query, [c], c.status == ^status)
+  end
+
+  defp filter_connection_info_status(query, statuses) when is_list(statuses) do
+    where(query, [c], c.status in ^statuses)
+  end
+
+  defp filter_connection_info_slug(query, nil), do: query
+
+  defp filter_connection_info_slug(query, slug) when is_binary(slug) do
+    where(query, [_c, p], p.slug == ^slug)
+  end
+
+  defp select_connection_info(query) do
+    select(query, [c, p], %ConnectionInfo{
+      id: c.id,
+      tenant_id: c.tenant_id,
+      provider_slug: p.slug,
+      status: c.status,
+      account_subject: c.account_subject,
+      granted_scopes: c.granted_scopes,
+      expires_at: c.expires_at
+    })
   end
 
   @doc """
@@ -157,8 +294,9 @@ defmodule Tango.Connection do
   Refreshes a connection's access token when it is about to expire.
 
   The connection row is locked while checking its expiry and requesting a token,
-  so concurrent callers reuse the first caller's result. A failed or disallowed
-  refresh still serves a valid access token, but reports an expired one as an error.
+  so concurrent callers reuse the first caller's result. A transient or
+  non-terminal failure still serves an active unexpired access token. Credential
+  expiry, a terminal failure, and a persistence or transaction failure do not.
   """
   @spec refresh_if_needed(Connection.t()) ::
           {:ok, Connection.t()} | {:error, {:refresh_failed, term()}} | {:error, :not_found}
@@ -177,11 +315,16 @@ defmodule Tango.Connection do
       end
     end
     |> repo().transaction()
-    |> case do
-      {:ok, outcome} -> outcome
-      {:error, reason} -> {:error, {:refresh_failed, {:transaction_failed, reason}}}
-    end
+    |> unwrap_refresh_transaction()
   end
+
+  defp unwrap_refresh_transaction({:ok, {:error, reason}}), do: {:error, reason}
+  defp unwrap_refresh_transaction({:ok, outcome}), do: outcome
+
+  defp unwrap_refresh_transaction({:error, :persistence_failed}),
+    do: {:error, :persistence_failed}
+
+  defp unwrap_refresh_transaction({:error, _reason}), do: {:error, :transaction_failed}
 
   defp load_connection_routing(id, tenant_id) do
     Connection
@@ -224,6 +367,15 @@ defmodule Tango.Connection do
     )
   end
 
+  defp refresh_locked(connection, :sweep) do
+    cond do
+      not sweep_due?(connection) -> {:skipped, connection}
+      not Connection.needs_refresh?(connection) -> {:skipped, connection}
+      not Connection.can_refresh?(connection) -> {:skipped, connection}
+      true -> attempt_refresh(connection)
+    end
+  end
+
   defp refresh_locked(connection, :expiry) do
     case {Connection.needs_refresh?(connection), Connection.can_refresh?(connection)} do
       {false, _can_refresh} -> {:current, connection}
@@ -252,20 +404,63 @@ defmodule Tango.Connection do
   defp refresh_outcome({:failed, reason, connection}),
     do: serve_unless_expired(reason, connection)
 
-  defp refresh_outcome({:error, _reason} = error), do: error
+  defp refresh_outcome({:error, :not_found}), do: {:error, :not_found}
+  defp refresh_outcome({:error, reason}), do: {:error, {:refresh_failed, reason}}
 
   defp attempt_refresh(connection) do
     case refresh_connection_locked(connection) do
-      {:ok, refreshed} -> {:refreshed, refreshed}
-      {:error, reason} -> {:failed, reason, record_refresh_failure_locked(connection, reason)}
+      {:ok, refreshed} ->
+        {:refreshed, refreshed}
+
+      {:error, reason} when reason in [:persistence_failed, :transaction_failed] ->
+        repo().rollback(reason)
+
+      {:error, reason} when reason in [:no_refresh_token, :refresh_not_allowed] ->
+        {:failed, reason, connection}
+
+      {:error, reason} ->
+        record_failed_refresh(connection, reason)
+    end
+  end
+
+  defp record_failed_refresh(connection, reason) do
+    case record_refresh_failure(connection, reason) do
+      {:ok, failed} ->
+        insert_refresh_audit(
+          AuditLog.log_connection_event(:token_refresh_failed, failed, false, %{
+            reason: RefreshError.to_storage(reason),
+            attempts: failed.refresh_attempts
+          })
+        )
+
+        {:failed, reason, failed}
+
+      {:error, _changeset} ->
+        repo().rollback(:persistence_failed)
     end
   end
 
   defp serve_unless_expired(reason, connection) do
-    if token_expired?(connection),
-      do: {:error, {:refresh_failed, reason}},
-      else: {:ok, connection}
+    if fallback_allowed?(reason, connection),
+      do: {:ok, connection},
+      else: {:error, {:refresh_failed, reason}}
   end
+
+  defp fallback_allowed?(reason, %Connection{status: :active} = connection) do
+    reason not in [:persistence_failed, :transaction_failed] and
+      RefreshError.classify(reason) != :credential and
+      not token_expired?(connection)
+  end
+
+  defp fallback_allowed?(_reason, _connection), do: false
+
+  defp sweep_due?(%Connection{next_refresh_at: nil}), do: true
+
+  defp sweep_due?(%Connection{next_refresh_at: next_refresh_at}) do
+    DateTime.compare(next_refresh_at, utc_now()) != :gt
+  end
+
+  defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 
   defp token_expired?(%Connection{expires_at: nil}), do: false
 
@@ -476,7 +671,13 @@ defmodule Tango.Connection do
       {:ok, %Connection{access_token: "new_token"}}
 
       iex> refresh_connection(expired_connection)
-      {:error, :refresh_failed}
+      {:error, {:oauth_error, :invalid_grant}}
+
+  A failed refresh returns `{:error, reason}` even when the current access
+  token still has time left. On-demand callers use
+  `refresh_if_needed/1`, which wraps the same reason as
+  `{:error, {:refresh_failed, reason}}` unless the active token may still
+  be served.
 
   """
   def refresh_connection(%Connection{} = connection) do
@@ -484,6 +685,8 @@ defmodule Tango.Connection do
       # Unlike refresh_if_needed/1, an explicit refresh reports the provider's
       # failure even while the current access token is still valid.
       {:failed, reason, _connection} -> {:error, reason}
+      {:error, {:refresh_failed, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
       outcome -> refresh_outcome(outcome)
     end
   end
@@ -493,11 +696,7 @@ defmodule Tango.Connection do
          {:ok, provider} <- get_connection_provider_cached(connection),
          {:ok, oauth_config} <- Provider.get_oauth_credentials(provider),
          {:ok, token_response} <- perform_token_refresh(oauth_config, provider, connection),
-         {:ok, updated_connection} <-
-           Tango.RedactedParams.update(
-             repo(),
-             Connection.refresh_changeset(connection, token_response)
-           ) do
+         {:ok, updated_connection} <- save_refreshed_connection(connection, token_response) do
       insert_refresh_audit(
         AuditLog.log_connection_event(:token_refreshed, updated_connection, true)
       )
@@ -506,20 +705,13 @@ defmodule Tango.Connection do
     end
   end
 
-  defp record_refresh_failure_locked(connection, reason) do
-    case record_refresh_failure(connection, reason) do
-      {:ok, failed_connection} ->
-        insert_refresh_audit(
-          AuditLog.log_connection_event(:token_refresh_failed, failed_connection, false, %{
-            reason: reason,
-            attempts: failed_connection.refresh_attempts
-          })
-        )
-
-        failed_connection
-
-      {:error, _update_reason} ->
-        connection
+  defp save_refreshed_connection(connection, token_response) do
+    case Tango.RedactedParams.update(
+           repo(),
+           Connection.refresh_changeset(connection, token_response)
+         ) do
+      {:ok, updated_connection} -> {:ok, updated_connection}
+      {:error, _changeset} -> {:error, :persistence_failed}
     end
   end
 
@@ -557,9 +749,8 @@ defmodule Tango.Connection do
 
   """
   def refresh_expiring_connections do
-    # Find connections that need refresh
     buffer_time = refresh_buffer_time()
-
+    now = utc_now()
     batch_size = Application.get_env(:tango, :refresh_batch_size, 100)
 
     connections =
@@ -570,26 +761,23 @@ defmodule Tango.Connection do
         where: not is_nil(c.refresh_token),
         where: not is_nil(c.expires_at),
         where: c.expires_at <= ^buffer_time,
+        where: is_nil(c.next_refresh_at) or c.next_refresh_at <= ^now,
+        order_by: [asc: c.id],
         limit: ^batch_size,
         preload: [:provider]
       )
       |> repo().all()
 
-    results =
-      connections
-      |> Enum.map(&locked_refresh(&1.id))
-      |> Enum.reject(&match?({:current, _connection}, &1))
-      |> Enum.group_by(&sweep_outcome/1)
+    outcomes = Enum.map(connections, &locked_refresh(&1.id, :sweep))
+    success_count = Enum.count(outcomes, &match?({:refreshed, _connection}, &1))
+    failure_count = Enum.count(outcomes, &sweep_failure?/1)
 
-    success_count = Map.get(results, :ok, []) |> length()
-    failure_count = Map.get(results, :error, []) |> length()
-
-    # Log batch refresh summary
     if success_count > 0 or failure_count > 0 do
       AuditLog.log_system_event(:batch_token_refresh, true, %{
         success_count: success_count,
         failure_count: failure_count,
-        total_processed: length(connections)
+        total_selected: length(connections),
+        total_processed: success_count + failure_count
       })
       |> repo().insert()
     end
@@ -597,26 +785,47 @@ defmodule Tango.Connection do
     {:ok, success_count}
   end
 
-  defp sweep_outcome({:refreshed, _connection}), do: :ok
-  defp sweep_outcome(_failed_or_error), do: :error
+  defp sweep_failure?({:failed, _reason, _connection}), do: true
+  defp sweep_failure?({:error, :not_found}), do: false
+  defp sweep_failure?({:error, _reason}), do: true
+  defp sweep_failure?(_skipped_or_current), do: false
 
   @doc """
   Revokes a connection.
 
-  Marks connection as revoked and logs the action.
+  Accepts the connection struct or its integer id. Missing, wrong-tenant, and
+  already-revoked ids return `{:error, :not_found}`. A struct whose tenant does
+  not match returns `{:error, :not_authorized}`. Active and expired connections
+  can be revoked. The row is locked and checked again inside the transaction.
 
   ## Examples
 
       iex> revoke_connection(connection, "user-123")
-      {:ok, %Connection{status: "revoked"}}
+      {:ok, %Connection{status: :revoked}}
+
+      iex> revoke_connection(123, "user-123")
+      {:ok, %Connection{status: :revoked}}
 
   """
+  def revoke_connection(connection_id, tenant_id)
+      when is_integer(connection_id) and is_binary(tenant_id) do
+    revoke_locked_connection(connection_id, tenant_id)
+  end
+
   def revoke_connection(%Connection{tenant_id: tenant_id} = connection, tenant_id) do
+    revoke_locked_connection(connection.id, tenant_id)
+  end
+
+  def revoke_connection(%Connection{}, _tenant_id) do
+    {:error, :not_authorized}
+  end
+
+  defp revoke_locked_connection(connection_id, tenant_id) do
     Ecto.Multi.new()
     |> Ecto.Multi.run(:locked_connection, fn repo, _changes ->
-      with {:ok, routing} <- load_connection_routing(repo, connection.id, tenant_id),
+      with {:ok, routing} <- load_connection_routing(repo, connection_id, tenant_id),
            :ok <- Tango.ConnectionLock.lock(repo, routing.provider_id, routing.tenant_id) do
-        lock_revokeable_connection(repo, connection.id, tenant_id)
+        lock_revokeable_connection(repo, connection_id, tenant_id)
       end
     end)
     |> Ecto.Multi.update(:connection, fn %{locked_connection: locked} ->
@@ -633,10 +842,6 @@ defmodule Tango.Connection do
     end
   end
 
-  def revoke_connection(%Connection{}, _tenant_id) do
-    {:error, :not_authorized}
-  end
-
   defp lock_revokeable_connection(repo, connection_id, tenant_id) do
     from(c in Connection,
       where: c.id == ^connection_id,
@@ -649,6 +854,105 @@ defmodule Tango.Connection do
       nil -> {:error, :not_found}
       connection -> {:ok, connection}
     end
+  end
+
+  @doc """
+  Acquires generation locks for one tenant's providers.
+
+  The caller must already be inside a transaction on Tango's configured repo.
+  A sandbox checkout, or a transaction on a different repo, returns
+  `{:error, :not_in_transaction}` before any lookup, including for an empty
+  slug list.
+
+  Slugs resolve before any lock, and inactive providers are included.
+  `missing: :error` (the default) returns
+  `{:error, {:provider_not_found, slug}}` for the first unknown slug in input
+  order and takes no locks. `missing: :skip` ignores unknown slugs. Invalid
+  options raise `ArgumentError`.
+
+  Pairs are locked by provider id, then Elixir tenant binary order. Repeating a
+  held pair does not block. Locks last until the outer transaction commits or
+  rolls back; a nested commit does not release them. Acquire the tenant's full
+  provider set once, before nested Tango operations. Adding a lower key after a
+  higher key can deadlock. Separate transactions are required for several
+  tenants unless the complete global order is established first.
+
+  A lock does not authorize the caller or replace a later state check.
+
+  ## Examples
+
+      iex> lock_connection_generations("user-123", ["records"])
+      :ok
+
+  """
+  @spec lock_connection_generations(String.t(), [String.t()], keyword()) ::
+          :ok | {:error, :not_in_transaction | {:provider_not_found, String.t()}}
+  def lock_connection_generations(tenant_id, provider_slugs, opts \\ [])
+      when is_binary(tenant_id) and is_list(provider_slugs) and is_list(opts) do
+    missing = generation_missing_mode!(opts)
+
+    with :ok <- require_generation_transaction() do
+      lock_generation_slugs(tenant_id, provider_slugs, missing)
+    end
+  end
+
+  defp generation_missing_mode!(opts) do
+    Enum.each(opts, &validate_generation_opt!/1)
+    Keyword.get(opts, :missing, :error)
+  end
+
+  defp validate_generation_opt!({:missing, mode}) when mode in [:error, :skip], do: :ok
+
+  defp validate_generation_opt!(option) do
+    raise ArgumentError, "invalid generation lock option: #{inspect(option)}"
+  end
+
+  defp require_generation_transaction do
+    if repo().in_transaction?() do
+      :ok
+    else
+      {:error, :not_in_transaction}
+    end
+  end
+
+  defp lock_generation_slugs(_tenant_id, [], _missing), do: :ok
+
+  defp lock_generation_slugs(tenant_id, slugs, missing) do
+    ids_by_slug = generation_provider_ids(slugs)
+
+    case first_missing_slug(slugs, ids_by_slug, missing) do
+      {:error, reason} ->
+        {:error, reason}
+
+      :ok ->
+        Tango.ConnectionLock.lock_ordered(repo(), generation_keys(slugs, ids_by_slug, tenant_id))
+    end
+  end
+
+  defp generation_provider_ids(slugs) do
+    Provider
+    |> where([provider], provider.slug in ^Enum.uniq(slugs))
+    |> select([provider], {provider.slug, provider.id})
+    |> repo().all()
+    |> Map.new()
+  end
+
+  defp first_missing_slug(_slugs, _ids_by_slug, :skip), do: :ok
+
+  defp first_missing_slug(slugs, ids_by_slug, :error) do
+    case Enum.find(slugs, &(not Map.has_key?(ids_by_slug, &1))) do
+      nil -> :ok
+      slug -> {:error, {:provider_not_found, slug}}
+    end
+  end
+
+  defp generation_keys(slugs, ids_by_slug, tenant_id) do
+    Enum.flat_map(slugs, fn slug ->
+      case Map.fetch(ids_by_slug, slug) do
+        {:ok, provider_id} -> [{provider_id, tenant_id}]
+        :error -> []
+      end
+    end)
   end
 
   @doc """
@@ -837,19 +1141,19 @@ defmodule Tango.Connection do
       {:ok, %{token: token}} ->
         {:ok, convert_token_to_response(token, connection)}
 
-      {:error, %OAuth2.Error{reason: reason}} ->
-        {:error, reason}
+      {:error, %OAuth2.Response{status_code: status, headers: headers, body: body}} ->
+        {:error, RefreshError.from_response(status, headers, body)}
 
-      {:error, %OAuth2.Response{status_code: status, body: body}} ->
-        {:error, "http_#{status}:#{oauth_error_code(body)}"}
+      {:error, %OAuth2.Error{reason: reason}} ->
+        {:error, RefreshError.from_transport(reason)}
+
+      {:error, %Ecto.Changeset{}} ->
+        {:error, :persistence_failed}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, RefreshError.from_transport(reason)}
     end
   end
-
-  defp oauth_error_code(%{"error" => code}) when is_binary(code), do: code
-  defp oauth_error_code(_body), do: "unknown"
 
   defp convert_token_to_response(%OAuth2.AccessToken{} = token, connection) do
     response = %{
@@ -901,13 +1205,9 @@ defmodule Tango.Connection do
       query
       |> select([c], {c.provider_id, c.tenant_id})
       |> distinct(true)
-      |> order_by([c], asc: c.provider_id, asc: c.tenant_id)
       |> repo.all()
 
-    Enum.each(keys, fn {provider_id, tenant_id} ->
-      :ok = Tango.ConnectionLock.lock(repo, provider_id, tenant_id)
-    end)
-
+    :ok = Tango.ConnectionLock.lock_ordered(repo, keys)
     keys
   end
 

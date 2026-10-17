@@ -229,7 +229,49 @@ defmodule Tango do
   defdelegate list_connections(tenant_id, opts \\ []), to: Tango.Connection
 
   @doc """
+  Gets credential-free connection info for any status.
+
+  Missing and wrong-tenant ids both return `{:error, :not_found}`. The read
+  does not refresh tokens or take locks. `:active` does not promise the access
+  token is usable.
+
+  ## Examples
+
+      iex> Tango.get_connection_info(123, "user-123")
+      {:ok, %Tango.ConnectionInfo{id: 123, status: :active}}
+
+  """
+  defdelegate get_connection_info(connection_id, tenant_id), to: Tango.Connection
+
+  @doc """
+  Lists credential-free connection info for a tenant.
+
+  Results are ordered by ascending connection id. `provider_slug` matches the
+  provider slug and includes inactive providers. `status` defaults to
+  `:active`. Pass `:any`, one of `:active`, `:expired`, or `:revoked`, or a
+  list of those statuses. An empty status list returns `[]`. Invalid options
+  raise `ArgumentError` before a query runs.
+
+  The read does not refresh tokens or take locks. `:active` does not promise
+  the access token is usable.
+
+  ## Examples
+
+      iex> Tango.list_connection_infos("user-123")
+      [%Tango.ConnectionInfo{}, ...]
+
+      iex> Tango.list_connection_infos("user-123", provider_slug: "records", status: :any)
+      [%Tango.ConnectionInfo{}, ...]
+
+  """
+  defdelegate list_connection_infos(tenant_id, opts \\ []), to: Tango.Connection
+
+  @doc """
   Gets connection for provider and tenant.
+
+  With `auto_refresh: true`, a refresh that cannot fall back to an active,
+  unexpired token returns `{:error, {:refresh_failed, reason}}`. `reason` is
+  a `Tango.RefreshError` term.
 
   ## Examples
 
@@ -237,7 +279,7 @@ defmodule Tango do
       {:ok, %Tango.Schemas.Connection{}}
 
       iex> Tango.get_connection_for_provider("github", "user-123", auto_refresh: true)
-      {:ok, %Tango.Schemas.Connection{}}  # Automatically refreshed if needed
+      {:ok, %Tango.Schemas.Connection{}}
 
   """
   defdelegate get_connection_for_provider(provider_name, tenant_id), to: Tango.Connection
@@ -245,16 +287,28 @@ defmodule Tango do
 
   @doc """
   Gets an active connection by ID with tenant isolation and optional refresh.
+
+  `auto_refresh: true` uses the same envelope as
+  `Tango.Connection.refresh_if_needed/1`: `{:error, {:refresh_failed, reason}}`
+  unless the active, unexpired token may still be served.
   """
   defdelegate get_active_connection(connection_id, tenant_id, opts \\ []), to: Tango.Connection
 
   @doc """
   Refreshes an OAuth connection's access token.
 
+  Returns `{:error, reason}` for a failed refresh, including while the current
+  access token still has time left. `reason` is a `Tango.RefreshError` term.
+  On-demand reads use `Tango.Connection.refresh_if_needed/1` and may wrap that
+  reason as `{:error, {:refresh_failed, reason}}`.
+
   ## Examples
 
       iex> Tango.refresh_connection(connection)
       {:ok, %Tango.Schemas.Connection{}}
+
+      iex> Tango.refresh_connection(connection)
+      {:error, {:oauth_error, :invalid_grant}}
 
   """
   defdelegate refresh_connection(connection), to: Tango.Connection
@@ -312,11 +366,46 @@ defmodule Tango do
   defdelegate mark_connection_used(connection), to: Tango.Connection
 
   @doc """
+  Acquires generation locks for one tenant's providers.
+
+  The caller must already be inside a transaction on Tango's configured repo,
+  in this process. A sandbox checkout or another repo's transaction returns
+  `{:error, :not_in_transaction}` before lookup, including for `[]`.
+
+  Inactive providers are resolved. `missing: :error` (the default) returns the
+  first unknown slug in input order and takes no locks. `missing: :skip`
+  ignores unknown slugs. Invalid options raise `ArgumentError`.
+
+  Pairs lock by provider id, then Elixir tenant binary order, and last until
+  the outer transaction commits or rolls back. A nested commit does not release
+  them. Acquire the tenant's full provider set once before nested Tango calls.
+  Repeating a held key is safe. Adding a lower key later, or composing several
+  tenants in arbitrary order, can deadlock. Locks neither authorize the caller
+  nor replace a later state check.
+
+  ## Examples
+
+      iex> Repo.transaction(fn -> Tango.lock_connection_generations("user-123", ["records"]) end)
+      {:ok, :ok}
+
+  """
+  defdelegate lock_connection_generations(tenant_id, provider_slugs, opts \\ []),
+    to: Tango.Connection
+
+  @doc """
   Revokes a connection for a tenant.
+
+  Accepts the connection struct or its integer id. Missing, wrong-tenant, and
+  already-revoked ids return `{:error, :not_found}`. A struct whose tenant does
+  not match returns `{:error, :not_authorized}`. Active and expired connections
+  can be revoked.
 
   ## Examples
 
       iex> Tango.revoke_connection(connection, "user-123")
+      {:ok, %Tango.Schemas.Connection{status: :revoked}}
+
+      iex> Tango.revoke_connection(123, "user-123")
       {:ok, %Tango.Schemas.Connection{status: :revoked}}
 
   """

@@ -8,8 +8,11 @@ defmodule Tango.ConnectionTest do
 
   use Tango.DatabaseCase, async: false
 
+  alias Ecto.Adapters.SQL.Sandbox
   alias Tango.{Factory, OAuthMockServer}
+  alias Tango.Schemas.AuditLog
   alias Tango.Schemas.Connection, as: ConnectionSchema
+  alias Tango.Schemas.Provider
 
   describe "refresh_changeset/2" do
     test "preserves omitted scopes and clears explicitly empty scopes" do
@@ -276,47 +279,6 @@ defmodule Tango.ConnectionTest do
       assert {:ok, served} = Tango.Connection.refresh_if_needed(stale)
       assert served.access_token == "winner_access_token"
       assert Repo.get!(ConnectionSchema, conn.id).refresh_attempts == 0
-    end
-
-    test "keeps serving a still-valid access token when refresh fails", %{
-      bypass: bypass,
-      urls: urls
-    } do
-      OAuthMockServer.setup_google_oauth(bypass, should_fail: true)
-      provider = Factory.create_google_provider("_refresh_still_valid", urls: urls)
-      tenant_id = Factory.tenant_id("refresh_still_valid")
-      conn = expire_in(Factory.create_connection(provider, tenant_id), 60)
-
-      assert {:ok, served} =
-               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id,
-                 auto_refresh: true
-               )
-
-      assert served.access_token == conn.access_token
-      assert Repo.get!(ConnectionSchema, conn.id).refresh_attempts == 1
-    end
-
-    test "returns refresh_failed and records the failure once the token has expired",
-         %{bypass: bypass, urls: urls} do
-      OAuthMockServer.setup_google_oauth(bypass, should_fail: true)
-      provider = Factory.create_google_provider("_refresh_expired", urls: urls)
-      tenant_id = Factory.tenant_id("refresh_expired")
-      conn = expire_in(Factory.create_connection(provider, tenant_id), -60)
-
-      assert {:error, {:refresh_failed, "http_400:invalid_grant"}} =
-               Tango.Connection.get_connection_for_provider(provider.slug, tenant_id,
-                 auto_refresh: true
-               )
-
-      failed = Repo.get!(ConnectionSchema, conn.id)
-      assert failed.refresh_attempts == 1
-      assert failed.last_refresh_failure == "http_400:invalid_grant"
-
-      assert Repo.exists?(
-               from(l in Tango.Schemas.AuditLog,
-                 where: l.connection_id == ^conn.id and l.event_type == :token_refresh_failed
-               )
-             )
     end
 
     test "returns refresh_not_allowed for an expired token that cannot refresh", %{urls: urls} do
@@ -894,6 +856,150 @@ defmodule Tango.ConnectionTest do
       assert revoked.status == :revoked
       assert Repo.get!(ConnectionSchema, expired.id).status == :revoked
     end
+
+    test "revokes active and expired ids in tenant scope" do
+      suffix = System.unique_integer([:positive])
+
+      provider =
+        Factory.create_provider(%{
+          slug: "records_revoke_#{suffix}",
+          name: "records_revoke_#{suffix}"
+        })
+
+      tenant_id = Factory.tenant_id("revoke_ids")
+
+      expired =
+        provider
+        |> Factory.create_connection(tenant_id)
+        |> ConnectionSchema.changeset(%{status: :expired})
+        |> Repo.update!()
+
+      active = Factory.create_connection(provider, tenant_id)
+
+      assert {:ok, revoked_active} = Tango.revoke_connection(active.id, tenant_id)
+      assert revoked_active.status == :revoked
+      assert revoked_audit_count(active.id) == 1
+
+      assert {:ok, revoked_expired} = Tango.revoke_connection(expired.id, tenant_id)
+      assert revoked_expired.status == :revoked
+      assert revoked_audit_count(expired.id) == 1
+    end
+
+    test "foreign missing and revoked ids are indistinguishable" do
+      suffix = System.unique_integer([:positive])
+
+      provider =
+        Factory.create_provider(%{
+          slug: "records_foreign_#{suffix}",
+          name: "records_foreign_#{suffix}"
+        })
+
+      owner = Factory.tenant_id("revoke_owner")
+      other = Factory.tenant_id("revoke_other")
+
+      revoked =
+        provider
+        |> Factory.create_connection(owner)
+        |> ConnectionSchema.changeset(%{status: :revoked})
+        |> Repo.update!()
+
+      foreign = Factory.create_connection(provider, other)
+
+      foreign_before = Repo.get!(ConnectionSchema, foreign.id)
+      assert {:error, :not_found} = Tango.revoke_connection(foreign.id, owner)
+      assert connection_unchanged?(foreign_before, Repo.get!(ConnectionSchema, foreign.id))
+
+      assert {:error, :not_found} = Tango.revoke_connection(-1, owner)
+
+      revoked_before = Repo.get!(ConnectionSchema, revoked.id)
+      assert {:error, :not_found} = Tango.revoke_connection(revoked.id, owner)
+      assert connection_unchanged?(revoked_before, Repo.get!(ConnectionSchema, revoked.id))
+      assert revoked_audit_count(foreign.id) == 0
+      assert revoked_audit_count(revoked.id) == 0
+    end
+
+    test "struct tenant mismatch remains not_authorized" do
+      suffix = System.unique_integer([:positive])
+
+      provider =
+        Factory.create_provider(%{
+          slug: "records_mismatch_#{suffix}",
+          name: "records_mismatch_#{suffix}"
+        })
+
+      connection = Factory.create_connection(provider, Factory.tenant_id("revoke_match"))
+      before = Repo.get!(ConnectionSchema, connection.id)
+
+      assert {:error, :not_authorized} =
+               Tango.revoke_connection(connection, Factory.tenant_id("revoke_mismatch"))
+
+      assert connection_unchanged?(before, Repo.get!(ConnectionSchema, connection.id))
+    end
+
+    test "revoke waits then rechecks state" do
+      suffix = System.unique_integer([:positive])
+      parent = self()
+
+      {provider, connection} =
+        Sandbox.unboxed_run(Repo, fn ->
+          provider =
+            Factory.create_provider(%{
+              slug: "records_race_#{suffix}",
+              name: "records_race_#{suffix}"
+            })
+
+          connection = Factory.create_connection(provider, Factory.tenant_id("revoke_race"))
+          {provider, connection}
+        end)
+
+      on_exit(fn -> cleanup_provider(provider.id) end)
+
+      holder =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            hold_then_revoke(provider.id, connection.id, connection.tenant_id, parent)
+          end)
+        end)
+
+      holder_pid = holder.pid
+      assert_receive {:held, ^holder_pid, holder_backend}, 5_000
+
+      {waiter, waiter_backend} = start_id_revoke(connection.id, connection.tenant_id)
+      await_revoke_blocked(waiter_backend, holder_backend)
+      assert Task.yield(waiter, 100) == nil
+
+      send(holder.pid, :revoke)
+      assert {:ok, {:ok, %{status: :revoked}}} = Task.await(holder)
+      assert {:error, :not_found} = Task.await(waiter)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        stored = Repo.get!(ConnectionSchema, connection.id)
+        assert stored.status == :revoked
+        assert revoked_audit_count(connection.id) == 1
+      end)
+    end
+
+    test "audit failure rolls back revocation" do
+      suffix = System.unique_integer([:positive])
+
+      provider =
+        Factory.create_provider(%{
+          slug: "records_audit_#{suffix}",
+          name: "records_audit_#{suffix}"
+        })
+
+      tenant_id = Factory.tenant_id("revoke_audit")
+      connection = Factory.create_connection(provider, tenant_id)
+      reject_audit_event("connection_revoked")
+      on_exit(fn -> drop_audit_reject_trigger() end)
+
+      assert_raise Postgrex.Error, fn ->
+        Tango.revoke_connection(connection.id, tenant_id)
+      end
+
+      assert Repo.get!(ConnectionSchema, connection.id).status == :active
+      assert revoked_audit_count(connection.id) == 0
+    end
   end
 
   describe "revoke_tenant_connections/1" do
@@ -1157,6 +1263,604 @@ defmodule Tango.ConnectionTest do
     end
   end
 
+  describe "refresh policy" do
+    test "HTML success preserves credentials and allows valid-token fallback" do
+      {bypass, provider} = open_records_provider("html_success")
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/html")
+        |> Plug.Conn.resp(200, "<html>LEAKED_PROVIDER_BODY</html>")
+      end)
+
+      connection = policy_connection(provider, "html_success", %{})
+
+      assert {:error, {:http_error, 200}} = Tango.Connection.refresh_connection(connection)
+
+      failed = reload(connection)
+      assert failed.refresh_attempts == 1
+      assert failed.last_refresh_failure == "http_error:200"
+      assert failed.access_token == connection.access_token
+      assert failed.refresh_token == connection.refresh_token
+      assert failed.expires_at == connection.expires_at
+
+      assert {:ok, served} = Tango.Connection.refresh_if_needed(failed)
+      assert served.access_token == connection.access_token
+      assert served.refresh_token == connection.refresh_token
+      assert served.expires_at == connection.expires_at
+
+      stored = reload(connection)
+      assert stored.access_token == connection.access_token
+      assert stored.refresh_token == connection.refresh_token
+      assert stored.expires_at == connection.expires_at
+      assert stored.status == :active
+      assert stored.refresh_exhausted == false
+      assert stored.refresh_attempts == 2
+      assert stored.last_refresh_failure == "http_error:200"
+      assert stored.next_refresh_at == nil
+
+      audit = refresh_failure_audit(connection.id)
+      assert audit_reason(audit) == "http_error:200"
+      refute Jason.encode!(audit.event_data) =~ "LEAKED_PROVIDER_BODY"
+    end
+
+    test "invalid_grant expires immediately without valid-token fallback" do
+      {bypass, provider} = open_records_provider("invalid_grant")
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/x-www-form-urlencoded")
+        |> Plug.Conn.resp(400, "error=invalid_grant&error_description=LEAKED_PROVIDER_BODY")
+      end)
+
+      reason = {:oauth_error, :invalid_grant}
+
+      for seconds <- [60, -60], entry <- [:refresh_if_needed, :active, :provider] do
+        connection =
+          policy_connection(provider, "grant_#{seconds}_#{entry}", %{
+            expires_at: DateTime.add(DateTime.utc_now(), seconds, :second)
+          })
+
+        result = on_demand(entry, connection, provider)
+        assert result == {:error, {:refresh_failed, reason}}
+        refute inspect(result) =~ "LEAKED_PROVIDER_BODY"
+        refute inspect(result) =~ connection.access_token
+        assert_credential_expiry(connection)
+      end
+
+      explicit =
+        policy_connection(provider, "grant_explicit", %{
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second)
+        })
+
+      result = Tango.Connection.refresh_connection(explicit)
+      assert result == {:error, reason}
+      refute inspect(result) =~ explicit.access_token
+      refute inspect(result) =~ "LEAKED_PROVIDER_BODY"
+      assert_credential_expiry(explicit)
+
+      audit = refresh_failure_audit(explicit.id)
+      assert audit_reason(audit) == "oauth_error:invalid_grant"
+      assert is_binary(Jason.encode!(audit.event_data))
+    end
+
+    test "transient refresh preserves prior attempts and valid-token fallback" do
+      {bypass, provider} = open_records_provider("transient")
+      {:ok, mode} = Agent.start_link(fn -> :outage end)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        case Agent.get(mode, & &1) do
+          :outage ->
+            json_response(conn, 503, %{"error" => "server_error"})
+
+          :limited ->
+            json_response(conn, 429, %{"error" => "invalid_grant"}, [{"retry-after", "30"}])
+        end
+      end)
+
+      valid = policy_connection(provider, "transient_valid", %{refresh_attempts: 2})
+      assert {:ok, served} = Tango.Connection.refresh_if_needed(valid)
+      assert served.access_token == valid.access_token
+      assert_transient_row(valid, "http_error:503")
+
+      explicit = policy_connection(provider, "transient_explicit", %{refresh_attempts: 2})
+      assert {:error, {:http_error, 503}} = Tango.Connection.refresh_connection(explicit)
+      assert_transient_row(explicit, "http_error:503")
+
+      expired =
+        policy_connection(provider, "transient_expired", %{
+          refresh_attempts: 2,
+          expires_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+      assert {:error, {:refresh_failed, {:http_error, 503}}} =
+               Tango.get_active_connection(expired.id, expired.tenant_id, auto_refresh: true)
+
+      assert_transient_row(expired, "http_error:503")
+
+      Agent.update(mode, fn _mode -> :limited end)
+      limited = policy_connection(provider, "transient_limited", %{refresh_attempts: 2})
+      assert {:error, {:rate_limited, 30}} = Tango.Connection.refresh_connection(limited)
+      assert_transient_row(limited, "rate_limited:30")
+
+      Bypass.down(bypass)
+      transport = policy_connection(provider, "transient_transport", %{refresh_attempts: 2})
+
+      assert {:ok, served} =
+               Tango.Connection.get_connection_for_provider(provider.slug, transport.tenant_id,
+                 auto_refresh: true
+               )
+
+      assert served.access_token == transport.access_token
+      assert_transient_row(transport, "transport_error:network_error")
+    end
+
+    test "client and request failures exhaust on the third attempt" do
+      {bypass, provider} = open_records_provider("budget")
+      {:ok, requests} = Agent.start_link(fn -> 0 end)
+      later = DateTime.add(DateTime.utc_now(), 7200, :second)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        Agent.update(requests, &(&1 + 1))
+
+        code =
+          if String.contains?(body, "request-token"),
+            do: "invalid_request",
+            else: "invalid_client"
+
+        json_response(conn, 400, %{"error" => code})
+      end)
+
+      for {suffix, token, code} <- [
+            {"client", "client-token", :invalid_client},
+            {"request", "request-token", :invalid_request}
+          ] do
+        connection =
+          policy_connection(provider, suffix, %{
+            "refresh_token" => token,
+            expires_at: later
+          })
+
+        Enum.each(1..3, fn attempt ->
+          current = reload(connection)
+
+          assert {:error, {:oauth_error, ^code}} =
+                   Tango.Connection.refresh_connection(current)
+
+          stored = reload(connection)
+          assert stored.refresh_attempts == attempt
+          assert stored.last_refresh_failure == "oauth_error:#{code}"
+          assert stored.next_refresh_at == nil
+
+          if attempt < 3 do
+            assert stored.status == :active
+            assert stored.refresh_exhausted == false
+            count = Agent.get(requests, & &1)
+            assert {:ok, served} = Tango.Connection.refresh_if_needed(stored)
+            assert served.access_token == stored.access_token
+            assert Agent.get(requests, & &1) == count
+          else
+            assert stored.status == :expired
+            assert stored.refresh_exhausted == true
+            assert DateTime.compare(stored.expires_at, DateTime.utc_now()) == :gt
+            count = Agent.get(requests, & &1)
+
+            assert {:error, :not_found} =
+                     Tango.get_active_connection(stored.id, stored.tenant_id, auto_refresh: true)
+
+            assert {:error, :not_found} = Tango.Connection.refresh_connection(stored)
+            assert Agent.get(requests, & &1) == count
+          end
+        end)
+      end
+
+      near =
+        policy_connection(provider, "terminal_near", %{
+          "refresh_token" => "client-token",
+          refresh_attempts: 2
+        })
+
+      assert {:error, {:refresh_failed, {:oauth_error, :invalid_client}}} =
+               Tango.Connection.get_connection_for_provider(provider.slug, near.tenant_id,
+                 auto_refresh: true
+               )
+
+      terminal = reload(near)
+      assert terminal.status == :expired
+      assert terminal.refresh_exhausted == true
+      assert {:error, :not_found} = Tango.Connection.refresh_if_needed(terminal)
+
+      revoked =
+        provider
+        |> policy_connection("revoked_budget", %{})
+        |> ConnectionSchema.changeset(%{status: :revoked})
+        |> Repo.update!()
+
+      count = Agent.get(requests, & &1)
+      assert {:error, :not_found} = Tango.Connection.refresh_connection(revoked)
+      assert Agent.get(requests, & &1) == count
+    end
+
+    test "backoff uses bounded UTC delay" do
+      {bypass, provider} = open_records_provider("backoff")
+      {:ok, mode} = Agent.start_link(fn -> {:status, 503, []} end)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        {:status, status, headers} = Agent.get(mode, & &1)
+        json_response(conn, status, %{"error" => "server_error"}, headers)
+      end)
+
+      default = policy_connection(provider, "backoff_default", %{})
+      {result, before_time, after_time, stored} = refresh_between(default)
+      assert result == {:error, {:http_error, 503}}
+      assert stored.last_refresh_failure == "http_error:503"
+      assert stored.refresh_attempts == 0
+      assert_delay(stored.next_refresh_at, 300, before_time, after_time)
+
+      for {header, parsed, delay, storage} <- [
+            {"120", 120, 120, "rate_limited:120"},
+            {"0", 0, 0, "rate_limited:0"},
+            {"7200", 7200, 3600, "rate_limited:7200"}
+          ] do
+        Agent.update(mode, fn _mode -> {:status, 429, [{"retry-after", header}]} end)
+        connection = policy_connection(provider, "backoff_#{header}", %{})
+        {result, before_time, after_time, stored} = refresh_between(connection)
+        assert result == {:error, {:rate_limited, parsed}}
+        assert stored.last_refresh_failure == storage
+        assert stored.refresh_attempts == 0
+        assert stored.status == :active
+        assert_delay(stored.next_refresh_at, delay, before_time, after_time)
+      end
+    end
+
+    test "forced and on-demand refresh ignore scheduling but respect eligibility" do
+      {bypass, provider} = open_records_provider("schedule")
+      {:ok, requests} = Agent.start_link(fn -> 0 end)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        Agent.update(requests, &(&1 + 1))
+
+        json_response(conn, 200, %{
+          "access_token" => "fresh_access_token",
+          "expires_in" => 3600,
+          "token_type" => "Bearer"
+        })
+      end)
+
+      prior = %{
+        next_refresh_at: DateTime.add(DateTime.utc_now(), 600, :second),
+        refresh_attempts: 2,
+        last_refresh_failure: "http_error:503",
+        refresh_exhausted: false,
+        auth_failures: 2,
+        last_auth_failure: "http_401"
+      }
+
+      refreshes = [
+        {"explicit", &Tango.Connection.refresh_connection/1},
+        {"needed", &Tango.Connection.refresh_if_needed/1},
+        {"active",
+         fn connection ->
+           Tango.get_active_connection(connection.id, connection.tenant_id, auto_refresh: true)
+         end},
+        {"provider",
+         fn connection ->
+           Tango.Connection.get_connection_for_provider(provider.slug, connection.tenant_id,
+             auto_refresh: true
+           )
+         end}
+      ]
+
+      for {suffix, refresh} <- refreshes do
+        connection = policy_connection(provider, "schedule_#{suffix}", prior)
+        assert {:ok, refreshed} = refresh.(connection)
+        assert refreshed.access_token == "fresh_access_token"
+        stored = reload(connection)
+        assert stored.next_refresh_at == nil
+        assert stored.last_refresh_failure == nil
+        assert stored.refresh_attempts == 0
+        assert stored.refresh_exhausted == false
+        assert stored.auth_failures == 0
+        assert stored.last_auth_failure == nil
+      end
+
+      assert Agent.get(requests, & &1) == 4
+
+      disabled =
+        policy_connection(provider, "schedule_disabled", %{
+          auto_refresh_enabled: false,
+          next_refresh_at: DateTime.add(DateTime.utc_now(), 600, :second)
+        })
+
+      count = Agent.get(requests, & &1)
+      assert {:error, :refresh_not_allowed} = Tango.Connection.refresh_connection(disabled)
+
+      assert {:ok, %{access_token: access_token}} =
+               Tango.Connection.refresh_if_needed(disabled)
+
+      assert access_token == disabled.access_token
+      assert Agent.get(requests, & &1) == count
+      assert_unchanged(disabled)
+
+      missing = policy_connection(provider, "schedule_missing", %{refresh_token: nil})
+      assert {:error, :no_refresh_token} = Tango.Connection.refresh_connection(missing)
+
+      assert {:ok, %{access_token: access_token}} =
+               Tango.Connection.refresh_if_needed(missing)
+
+      assert access_token == missing.access_token
+      assert Agent.get(requests, & &1) == count
+      assert reload(missing).refresh_attempts == 0
+      assert reload(missing).last_refresh_failure == nil
+
+      revoked =
+        provider
+        |> policy_connection("schedule_revoked", %{})
+        |> ConnectionSchema.changeset(%{status: :revoked})
+        |> Repo.update!()
+
+      assert {:error, :not_found} = Tango.Connection.refresh_connection(revoked)
+      assert Agent.get(requests, & &1) == count
+    end
+
+    test "returned persistence failures never expose credentials or serve old tokens" do
+      {bypass, provider} = open_records_provider("persist")
+      {:ok, script} = Agent.start_link(fn -> :token end)
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        case Agent.get(script, & &1) do
+          :token ->
+            json_response(conn, 200, %{
+              "access_token" => "SENTINEL_ACCESS_TOKEN",
+              "expires_in" => 3600,
+              "token_type" => "Bearer"
+            })
+
+          :outage ->
+            json_response(conn, 503, %{"error" => "server_error"})
+        end
+      end)
+
+      swap_failure_repo()
+
+      explicit = policy_connection(provider, "token_explicit", %{})
+      Tango.RefreshFailureRepo.fail_once(:token_write)
+
+      assert Tango.Connection.refresh_connection(explicit) == {:error, :persistence_failed}
+      assert_unchanged(explicit)
+      refute_rollback_marker(explicit)
+
+      demand = policy_connection(provider, "token_demand", %{})
+      Tango.RefreshFailureRepo.fail_once(:token_write)
+
+      assert Tango.Connection.refresh_if_needed(demand) ==
+               {:error, {:refresh_failed, :persistence_failed}}
+
+      assert_unchanged(demand)
+      refute_rollback_marker(demand)
+
+      Agent.update(script, fn _script -> :outage end)
+      failed_explicit = policy_connection(provider, "book_explicit", %{})
+      Tango.RefreshFailureRepo.fail_once(:failure_write)
+
+      assert Tango.Connection.refresh_connection(failed_explicit) == {:error, :persistence_failed}
+      assert_unchanged(failed_explicit)
+      refute_rollback_marker(failed_explicit)
+
+      failed_demand = policy_connection(provider, "book_demand", %{})
+      Tango.RefreshFailureRepo.fail_once(:failure_write)
+
+      assert Tango.Connection.refresh_if_needed(failed_demand) ==
+               {:error, {:refresh_failed, :persistence_failed}}
+
+      assert_unchanged(failed_demand)
+      refute_rollback_marker(failed_demand)
+
+      transactional = policy_connection(provider, "txn_explicit", %{})
+      Tango.RefreshFailureRepo.fail_once(:transaction)
+      assert Tango.Connection.refresh_connection(transactional) == {:error, :transaction_failed}
+      assert_unchanged(transactional)
+
+      transactional_demand = policy_connection(provider, "txn_demand", %{})
+      Tango.RefreshFailureRepo.fail_once(:transaction)
+
+      assert Tango.Connection.refresh_if_needed(transactional_demand) ==
+               {:error, {:refresh_failed, :transaction_failed}}
+
+      assert_unchanged(transactional_demand)
+    end
+
+    test "audit failure does not discard a saved rotated token" do
+      {bypass, provider} = open_records_provider("audit_fail")
+      token = "SENTINEL_ACCESS_TOKEN_#{System.unique_integer([:positive])}"
+
+      Bypass.stub(bypass, "POST", "/oauth2/token", fn conn ->
+        json_response(conn, 200, %{
+          "access_token" => token,
+          "refresh_token" => "rotated_refresh_token",
+          "expires_in" => 3600,
+          "token_type" => "Bearer"
+        })
+      end)
+
+      connection = policy_connection(provider, "audit_fail", %{})
+      swap_failure_repo()
+      Tango.RefreshFailureRepo.fail_once(:audit_write)
+      attach_query_log()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, refreshed} = Tango.Connection.refresh_connection(connection)
+          assert refreshed.access_token == token
+        end)
+
+      assert reload(connection).access_token == token
+      queries = receive_queries([])
+
+      refute Enum.any?(queries, fn metadata ->
+               String.contains?(metadata, token) or
+                 String.contains?(metadata, "sentinel_persistence_detail")
+             end)
+
+      refute log =~ token
+      refute log =~ "sentinel_persistence_detail"
+    end
+  end
+
+  defp open_records_provider(suffix) do
+    bypass = Bypass.open()
+
+    provider =
+      Factory.create_google_provider("_#{suffix}_#{System.unique_integer([:positive])}",
+        urls: OAuthMockServer.google_urls(bypass)
+      )
+
+    {bypass, provider}
+  end
+
+  defp policy_connection(provider, suffix, attrs) do
+    token_attrs =
+      attrs
+      |> Map.take([:access_token, :refresh_token, "access_token", "refresh_token"])
+      |> Map.new(fn
+        {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+        pair -> pair
+      end)
+
+    fields =
+      attrs
+      |> Map.drop([:access_token, :refresh_token, "access_token", "refresh_token"])
+      |> Map.put_new(:expires_at, DateTime.add(DateTime.utc_now(), 60, :second))
+
+    provider
+    |> Factory.create_connection(Factory.tenant_id(suffix), token_attrs)
+    |> ConnectionSchema.changeset(fields)
+    |> Repo.update!()
+  end
+
+  defp on_demand(:refresh_if_needed, connection, _provider) do
+    Tango.Connection.refresh_if_needed(connection)
+  end
+
+  defp on_demand(:active, connection, _provider) do
+    Tango.get_active_connection(connection.id, connection.tenant_id, auto_refresh: true)
+  end
+
+  defp on_demand(:provider, connection, provider) do
+    Tango.Connection.get_connection_for_provider(provider.slug, connection.tenant_id,
+      auto_refresh: true
+    )
+  end
+
+  defp json_response(conn, status, body, headers \\ []) do
+    conn =
+      Enum.reduce(headers, conn, fn {name, value}, conn ->
+        Plug.Conn.put_resp_header(conn, name, value)
+      end)
+
+    conn
+    |> Plug.Conn.put_resp_header("content-type", "application/json")
+    |> Plug.Conn.resp(status, Jason.encode!(body))
+  end
+
+  defp reload(connection), do: Repo.get!(ConnectionSchema, connection.id)
+
+  defp assert_credential_expiry(connection) do
+    failed = reload(connection)
+    assert failed.status == :expired
+    assert failed.refresh_exhausted == true
+    assert failed.refresh_attempts == connection.refresh_attempts + 1
+    assert failed.next_refresh_at == nil
+    assert failed.last_refresh_failure == "oauth_error:invalid_grant"
+    assert failed.access_token == connection.access_token
+  end
+
+  defp assert_transient_row(connection, storage) do
+    stored = reload(connection)
+    assert stored.refresh_attempts == 2
+    assert stored.status == :active
+    assert stored.refresh_exhausted == false
+    assert stored.last_refresh_failure == storage
+    assert DateTime.compare(stored.next_refresh_at, DateTime.utc_now()) == :gt
+  end
+
+  defp refresh_failure_audit(connection_id) do
+    Repo.one!(
+      from(l in AuditLog,
+        where: l.connection_id == ^connection_id and l.event_type == :token_refresh_failed,
+        order_by: [desc: l.id],
+        limit: 1
+      )
+    )
+  end
+
+  defp audit_reason(audit) do
+    Map.get(audit.event_data, "reason") || Map.get(audit.event_data, :reason)
+  end
+
+  defp refresh_between(connection) do
+    before_time = DateTime.utc_now() |> DateTime.truncate(:second)
+    result = Tango.Connection.refresh_connection(connection)
+    after_time = DateTime.utc_now() |> DateTime.truncate(:second)
+    {result, before_time, after_time, reload(connection)}
+  end
+
+  defp assert_delay(next, delay, before_time, after_time) do
+    assert DateTime.compare(next, DateTime.add(before_time, delay, :second)) != :lt
+    assert DateTime.compare(next, DateTime.add(after_time, delay, :second)) != :gt
+  end
+
+  defp refute_rollback_marker(connection) do
+    refute reload(connection).last_auth_failure == Tango.RefreshFailureRepo.rollback_marker()
+  end
+
+  defp assert_unchanged(connection) do
+    stored = reload(connection)
+    assert stored.access_token == connection.access_token
+    assert stored.refresh_token == connection.refresh_token
+    assert stored.refresh_attempts == connection.refresh_attempts
+    assert stored.status == connection.status
+    assert stored.refresh_exhausted == connection.refresh_exhausted
+    assert stored.last_refresh_failure == connection.last_refresh_failure
+    assert stored.next_refresh_at == connection.next_refresh_at
+  end
+
+  defp swap_failure_repo do
+    original = Application.get_env(:tango, :repo)
+
+    Application.put_env(:tango, :repo, Tango.RefreshFailureRepo)
+
+    on_exit(fn ->
+      Tango.RefreshFailureRepo.clear_mode()
+      Application.put_env(:tango, :repo, original)
+    end)
+  end
+
+  defp attach_query_log do
+    test_pid = self()
+    handler = "refresh-queries-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:tango, :test_repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        send(test_pid, {:refresh_query, inspect(metadata)})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp receive_queries(acc) do
+    receive do
+      {:refresh_query, metadata} -> receive_queries([metadata | acc])
+    after
+      0 -> acc
+    end
+  end
+
   defp expire_in(connection, seconds) do
     {:ok, updated} =
       connection
@@ -1171,6 +1875,8 @@ defmodule Tango.ConnectionTest do
   # Installs a sandbox-scoped trigger that makes inserting one audit event fail
   # at the database, the way a full disk or a dropped partition would.
   defp reject_audit_event(event_type) do
+    drop_audit_reject_trigger()
+
     Repo.query!("""
     CREATE OR REPLACE FUNCTION tango_test_reject_audit() RETURNS trigger AS $$
     BEGIN
@@ -1186,6 +1892,92 @@ defmodule Tango.ConnectionTest do
     CREATE TRIGGER tango_test_reject_audit BEFORE INSERT ON tango_audit_logs
     FOR EACH ROW EXECUTE FUNCTION tango_test_reject_audit('#{event_type}')
     """)
+  end
+
+  defp drop_audit_reject_trigger do
+    case Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, :owner} -> :ok
+    end
+
+    Repo.query!("DROP TRIGGER IF EXISTS tango_test_reject_audit ON tango_audit_logs")
+  end
+
+  defp revoked_audit_count(connection_id) do
+    Repo.aggregate(
+      from(log in AuditLog,
+        where: log.connection_id == ^connection_id and log.event_type == :connection_revoked
+      ),
+      :count
+    )
+  end
+
+  defp connection_unchanged?(before, after_row) do
+    before.status == after_row.status and before.lock_version == after_row.lock_version and
+      before.updated_at == after_row.updated_at
+  end
+
+  defp hold_then_revoke(provider_id, connection_id, tenant_id, parent) do
+    Repo.transaction(fn ->
+      :ok = Tango.ConnectionLock.lock(Repo, provider_id, tenant_id)
+      send(parent, {:held, self(), revoke_backend_pid()})
+
+      receive do
+        :revoke -> Tango.revoke_connection(connection_id, tenant_id)
+      end
+    end)
+  end
+
+  defp start_id_revoke(connection_id, tenant_id) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          send(parent, {:revoke_waiter, self(), revoke_backend_pid()})
+          Tango.revoke_connection(connection_id, tenant_id)
+        end)
+      end)
+
+    task_pid = task.pid
+    assert_receive {:revoke_waiter, ^task_pid, backend}, 5_000
+    {task, backend}
+  end
+
+  defp revoke_backend_pid do
+    %{rows: [[pid]]} = Repo.query!("SELECT pg_backend_pid()")
+    pid
+  end
+
+  defp await_revoke_blocked(waiter_pid, holder_pid, attempts \\ 100)
+
+  defp await_revoke_blocked(_waiter_pid, _holder_pid, 0),
+    do: flunk("revocation did not wait for the generation lock")
+
+  defp await_revoke_blocked(waiter_pid, holder_pid, attempts) do
+    %{rows: [[blocked?]]} =
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.query!("SELECT $1::int = ANY(pg_blocking_pids($2::int))", [holder_pid, waiter_pid])
+      end)
+
+    if blocked? do
+      :ok
+    else
+      Process.sleep(20)
+      await_revoke_blocked(waiter_pid, holder_pid, attempts - 1)
+    end
+  end
+
+  defp cleanup_provider(provider_id) do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.delete_all(from(log in AuditLog, where: log.provider_id == ^provider_id))
+
+      Repo.delete_all(
+        from(connection in ConnectionSchema, where: connection.provider_id == ^provider_id)
+      )
+
+      Repo.delete_all(from(provider in Provider, where: provider.id == ^provider_id))
+    end)
   end
 
   describe "OAuth2 client configuration for token refresh" do

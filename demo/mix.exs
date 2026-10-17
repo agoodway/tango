@@ -27,7 +27,7 @@ defmodule Demo.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, quality: :test]
     ]
   end
 
@@ -88,7 +88,8 @@ defmodule Demo.MixProject do
         "esbuild demo --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      quality: ["compile --warnings-as-errors", "format --check-formatted", "test"]
     ]
   end
 end

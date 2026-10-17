@@ -14,20 +14,17 @@ defmodule Demo.GithubFlow do
 
   @doc "Creates the GitHub provider with its token endpoint pointed at `bypass`."
   def create_provider(bypass) do
-    {:ok, provider} =
-      Tango.create_provider(%{
-        slug: Demo.GithubConnect.provider(),
-        name: "GitHub",
-        client_secret: "github-client-secret",
-        default_scopes: Demo.GithubConnect.scopes(),
-        config: %{
-          "client_id" => "github-client-id",
-          "auth_url" => "http://localhost:#{bypass.port}/login/oauth/authorize",
-          "token_url" => "http://localhost:#{bypass.port}/login/oauth/access_token"
-        }
-      })
-
-    provider
+    Tango.Testing.insert_provider!(%{
+      slug: Demo.GithubConnect.provider(),
+      name: "GitHub",
+      client_secret: "github-client-secret",
+      default_scopes: Demo.GithubConnect.scopes(),
+      config: %{
+        "client_id" => "github-client-id",
+        "auth_url" => "http://localhost:#{bypass.port}/login/oauth/authorize",
+        "token_url" => "http://localhost:#{bypass.port}/login/oauth/access_token"
+      }
+    })
   end
 
   @doc """

@@ -182,7 +182,7 @@ defmodule Tango.IntegrationTest do
 
       assert failure_changeset.valid?
       assert get_change(failure_changeset, :refresh_attempts) == 1
-      assert get_change(failure_changeset, :last_refresh_failure) == "invalid_refresh_token"
+      assert get_change(failure_changeset, :last_refresh_failure) == "unknown_refresh_error"
 
       # === STEP 8: Verify Audit Logging Throughout ===
       # Test OAuth start logging

@@ -6,8 +6,6 @@ defmodule DemoWeb.DemoLive do
   import DemoWeb.TangoLogsComponent
   require Ecto.Query
 
-  alias Tango.Schemas.Connection
-
   @impl true
   def mount(_params, _session, socket) do
     socket =
@@ -245,6 +243,19 @@ defmodule DemoWeb.DemoLive do
     {:noreply, socket}
   end
 
+  def handle_async(
+        :fetch_github_profile,
+        {:ok, {:error, {:refresh_failed, reason}}},
+        socket
+      ) do
+    message = "GitHub token refresh failed (#{Tango.RefreshError.to_storage(reason)})"
+    {:noreply, profile_connection_failed(socket, message)}
+  end
+
+  def handle_async(:fetch_github_profile, {:ok, {:error, :not_found}}, socket) do
+    {:noreply, profile_connection_failed(socket, "GitHub connection is no longer active")}
+  end
+
   def handle_async(:fetch_github_profile, _failed, socket) do
     socket =
       socket
@@ -260,12 +271,30 @@ defmodule DemoWeb.DemoLive do
     |> put_flash(:error, "OAuth connection could not be verified")
   end
 
+  defp profile_connection_failed(socket, message) do
+    socket
+    |> load_tango_data()
+    |> assign_expected_connection_info()
+    |> assign_profile_connection_state()
+    |> assign(:loading_profile, false)
+    |> put_flash(:error, message)
+  end
+
+  defp assign_profile_connection_state(%{assigns: %{connection_details: nil}} = socket) do
+    socket
+    |> assign(:connected_provider, nil)
+    |> assign(:github_user, nil)
+    |> assign(:github_repos, [])
+  end
+
+  defp assign_profile_connection_state(socket) do
+    assign(socket, :connected_provider, socket.assigns.connection_details.provider_slug)
+  end
+
   defp fetch_github_profile(connection_id, tenant_id) do
     with {:ok, connection} <-
            Tango.get_active_connection(connection_id, tenant_id, auto_refresh: true) do
-      connection
-      |> Connection.get_raw_access_token()
-      |> Demo.GithubClient.fetch_profile()
+      Demo.GithubClient.fetch_profile(connection.access_token)
     end
   end
 
@@ -296,11 +325,7 @@ defmodule DemoWeb.DemoLive do
       |> Demo.Repo.all()
       |> deduplicate_logs()
 
-    connection =
-      case Tango.get_connection_for_provider("github", tenant_id) do
-        {:ok, conn} -> conn
-        _ -> nil
-      end
+    connection = active_connection_info(tenant_id)
 
     socket
     |> assign(:audit_logs, audit_logs)
@@ -316,18 +341,29 @@ defmodule DemoWeb.DemoLive do
   end
 
   defp assign_expected_connection(socket) do
-    case Tango.get_connection_for_provider(
-           Demo.GithubConnect.provider(),
-           socket.assigns.tenant_id
-         ) do
-      {:ok, connection} ->
+    socket
+    |> assign(:connection_details, active_connection_info(socket.assigns.tenant_id))
+    |> assign_expected_connection_info()
+  end
+
+  defp assign_expected_connection_info(socket) do
+    case socket.assigns.connection_details do
+      %Tango.ConnectionInfo{} = connection ->
         socket
         |> assign(:expected_connection_id, connection.id)
         |> assign(:expected_subject, connection.account_subject)
 
-      _ ->
+      nil ->
         socket
+        |> assign(:expected_connection_id, nil)
+        |> assign(:expected_subject, nil)
     end
+  end
+
+  defp active_connection_info(tenant_id) do
+    tenant_id
+    |> Tango.list_connection_infos(provider_slug: Demo.GithubConnect.provider())
+    |> List.first()
   end
 
   defp callback_url do

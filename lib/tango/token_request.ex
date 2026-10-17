@@ -24,7 +24,8 @@ defmodule Tango.TokenRequest do
   """
 
   alias OAuth2.Client
-  alias Tango.TokenRequest.HeaderAuthCode
+  alias OAuth2.Strategy.Refresh
+  alias Tango.TokenRequest.{HeaderAuthCode, RefreshJSON}
 
   @doc """
   Exchanges an authorization code. `params` is the keyword list of standard
@@ -43,14 +44,39 @@ defmodule Tango.TokenRequest do
   @doc "Refreshes an access token with `refresh_token`."
   def refresh(oauth_config, metadata, refresh_token) do
     metadata = metadata || %{}
+    RefreshJSON.consume_undecoded?()
 
     oauth_config
-    |> new_client(OAuth2.Strategy.Refresh, [])
+    |> new_client(Refresh, [])
+    |> Client.put_serializer("application/json", RefreshJSON)
     |> Client.merge_params(extra_params(refresh_params(metadata)))
     |> put_body_credentials(oauth_config, metadata)
     |> Client.put_param("refresh_token", refresh_token)
-    |> Client.get_token([], headers(metadata))
+    |> get_refresh_token(headers(metadata))
   end
+
+  # Inspect the decoded response before OAuth2 can turn a binary into a token.
+  # Empty bodies and non-JSON content types can bypass the JSON serializer.
+  defp get_refresh_token(client, headers) do
+    client =
+      client
+      |> Client.put_header("content-type", "application/x-www-form-urlencoded")
+      |> Client.put_header("accept", "application/json")
+      |> Refresh.get_token([], headers)
+
+    result = Client.post(client, client.token_url, client.params, client.headers)
+    build_refresh_token(result, client, RefreshJSON.consume_undecoded?())
+  end
+
+  defp build_refresh_token({:ok, %OAuth2.Response{body: body}}, client, false)
+       when is_map(body) do
+    {:ok, %{client | headers: [], params: %{}, token: OAuth2.AccessToken.new(body)}}
+  end
+
+  defp build_refresh_token({:ok, %OAuth2.Response{} = response}, _client, _undecoded?),
+    do: {:error, response}
+
+  defp build_refresh_token({:error, _reason} = error, _client, _undecoded?), do: error
 
   defp new_client(oauth_config, strategy, opts) do
     Client.new(

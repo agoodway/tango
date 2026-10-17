@@ -55,39 +55,36 @@ defmodule DemoWeb.TangoLogsComponent do
               </div>
             </div>
           </div>
-
-          <%!-- Connection Details --%>
-          <div :if={@connection} class="mt-4 pt-4 border-t border-[#333]">
-            <div class="text-[#9a9a9a] text-[11px] uppercase tracking-wider mb-2 font-medium">
-              Connection
-            </div>
-            <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12px]">
-              <span class="text-[#777]">Status</span>
-              <span class="text-[#98c379] flex items-center gap-1.5">
-                <span class="w-1.5 h-1.5 rounded-full bg-[#98c379] inline-block"></span>
-                {to_string(@connection.status)}
-              </span>
-
-              <span class="text-[#777]">Tenant</span>
-              <span class="text-[#abb2bf]">{@connection.tenant_id}</span>
-
-              <span class="text-[#777]">Provider</span>
-              <span class="text-[#abb2bf]">{@connection.provider.name}</span>
-
-              <span class="text-[#777]">Scopes</span>
-              <span class="text-[#abb2bf]">{Enum.join(@connection.granted_scopes, ", ")}</span>
-
-              <span class="text-[#777]">Token</span>
-              <span class="text-[#e5c07b]">encrypted (AES-256-GCM)</span>
-
-              <span class="text-[#777]">Created</span>
-              <span class="text-[#abb2bf]">{relative_time(@connection.inserted_at)}</span>
-
-              <span class="text-[#777]">Expires</span>
-              <span class="text-[#abb2bf]">{expires_label(@connection.expires_at)}</span>
-            </div>
-          </div>
         <% end %>
+
+        <%!-- Connection Details --%>
+        <div :if={@connection} id="tango-connection-info" class="mt-4 pt-4 border-t border-[#333]">
+          <div class="text-[#9a9a9a] text-[11px] uppercase tracking-wider mb-2 font-medium">
+            Connection
+          </div>
+          <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12px]">
+            <span class="text-[#777]">Status</span>
+            <span class="text-[#98c379] flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-[#98c379] inline-block"></span>
+              {to_string(@connection.status)}
+            </span>
+
+            <span class="text-[#777]">Tenant</span>
+            <span class="text-[#abb2bf]">{@connection.tenant_id}</span>
+
+            <span class="text-[#777]">Provider</span>
+            <span class="text-[#abb2bf]">{@connection.provider_slug}</span>
+
+            <span class="text-[#777]">Scopes</span>
+            <span class="text-[#abb2bf]">{Enum.join(@connection.granted_scopes || [], ", ")}</span>
+
+            <span class="text-[#777]">Token</span>
+            <span class="text-[#e5c07b]">encrypted (AES-256-GCM)</span>
+
+            <span class="text-[#777]">Expires</span>
+            <span class="text-[#abb2bf]">{expires_label(@connection.expires_at)}</span>
+          </div>
+        </div>
       </div>
     </div>
     """
@@ -152,20 +149,6 @@ defmodule DemoWeb.TangoLogsComponent do
   end
 
   defp event_details(_), do: ""
-
-  defp relative_time(nil), do: "unknown"
-
-  defp relative_time(%NaiveDateTime{} = ndt) do
-    diff = NaiveDateTime.diff(NaiveDateTime.utc_now(), ndt, :second)
-
-    cond do
-      diff < 5 -> "just now"
-      diff < 60 -> "#{diff}s ago"
-      diff < 3600 -> "#{div(diff, 60)}m ago"
-      diff < 86400 -> "#{div(diff, 3600)}h ago"
-      true -> Calendar.strftime(ndt, "%Y-%m-%d %H:%M")
-    end
-  end
 
   defp expires_label(nil), do: "never"
 

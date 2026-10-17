@@ -375,40 +375,50 @@ defmodule Tango.NetworkFailureTest do
 
     test "handles concurrent connection refresh" do
       tenant_id = Factory.tenant_id("concurrent_refresh_test")
+      bypass = Bypass.open()
 
-      # Create connections with different providers to avoid unique constraints
+      Bypass.expect(bypass, "POST", "/oauth/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(503, Jason.encode!(%{"error" => "invalid_grant"}))
+      end)
+
       providers =
         for i <- 1..3 do
-          Factory.create_github_provider("_concurrent_refresh_#{i}")
+          Tango.Testing.insert_provider!(%{
+            config: %{
+              "client_id" => "records_client_#{i}",
+              "auth_url" => "http://localhost:#{bypass.port}/oauth/authorize",
+              "token_url" => "http://localhost:#{bypass.port}/oauth/token"
+            }
+          })
         end
 
       connections =
         for {provider, i} <- Enum.with_index(providers, 1) do
-          Factory.create_github_connection(provider, "#{tenant_id}_#{i}", "_concurrent_#{i}")
+          Tango.Testing.insert_connection!(provider, "#{tenant_id}_#{i}", %{
+            refresh_attempts: 2
+          })
         end
 
-      # Attempt concurrent refresh with error handling
+      # These callers share a sandbox connection. Separate-session lock ordering
+      # is exercised in ConnectionRefreshLockTest; this verifies safe failures.
       tasks =
         for connection <- connections do
-          Task.async(fn ->
-            try do
-              Connection.refresh_connection(connection)
-            rescue
-              error in [FunctionClauseError, RuntimeError, MatchError, Protocol.UndefinedError] ->
-                {:error, Exception.message(error)}
-            end
-          end)
+          Task.async(fn -> Connection.refresh_connection(connection) end)
         end
 
-      results = Task.await_many(tasks, 10_000)
+      assert Task.await_many(tasks, 5_000) == List.duplicate({:error, {:http_error, 503}}, 3)
 
-      # All should complete without crashing the test process
-      for result <- results do
-        case result do
-          {:ok, _connection} -> :ok
-          {:error, _reason} -> :ok
-          other -> flunk("Unexpected concurrent refresh result: #{inspect(other)}")
-        end
+      for connection <- connections do
+        stored = Repo.get!(Tango.Schemas.Connection, connection.id)
+        assert stored.status == :active
+        assert stored.refresh_attempts == 2
+        refute stored.refresh_exhausted
+        assert stored.last_refresh_failure == "http_error:503"
+        assert stored.access_token == connection.access_token
+        assert stored.refresh_token == connection.refresh_token
+        assert DateTime.compare(stored.next_refresh_at, DateTime.utc_now()) == :gt
       end
     end
   end

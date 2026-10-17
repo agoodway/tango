@@ -33,12 +33,20 @@ headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 
 Tango.mark_connection_used(connection)
 
-# With auto-refresh, an expired token that cannot be refreshed returns
-# {:error, {:refresh_failed, reason}}.
+# On-demand refresh returns {:error, {:refresh_failed, reason}} when the
+# current token cannot be served. `reason` is a Tango.RefreshError term.
+# Credential failure and an exhausted client or request budget do not return
+# the old access token. Timeouts, 429, and 5xx may still return it while the
+# row stays active and unexpired. Tango.refresh_connection/1 always returns
+# {:error, reason} for a failed refresh. Sweep backoff does not apply here.
 {:ok, connection} =
   Tango.get_connection_for_provider("github", tenant_id, auto_refresh: true)
 
+# Log or store a failure with Tango.RefreshError.to_storage/1.
+# Do not match old last_refresh_failure strings.
+
 {:ok, _revoked} = Tango.revoke_connection(connection, tenant_id)
+{:ok, info} = Tango.get_connection_info(connection.id, tenant_id)
 ```
 
 ## Reporting provider auth outcomes

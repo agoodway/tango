@@ -208,7 +208,7 @@ window.addEventListener("message", async (event) => {
 - The verifier sees the candidate's access token for the duration of one call. Do not store it, log it, or include it in claims.
 - Ecto SQL logs and telemetry metadata for Tango's token writes carry an opaque placeholder, not the token. Audit rows never contain tokens, codes, provider bodies, raw state, or the completion handle.
 - The `connection` returned by `multi_finalize_authorization/5` holds usable plaintext tokens. Persist only `connection.id` and the identity summary in your own tables. Do not copy tokens into your records, job arguments, logs, error reports, or browser responses.
-- Read credentials when you call the provider with `Tango.get_active_connection(connection_id, tenant_id, auto_refresh: true)`, which returns `{:error, :not_found}` or `{:error, {:refresh_failed, reason}}` instead of a stale token.
+- Read credentials when you call the provider with `Tango.get_active_connection(connection_id, tenant_id, auto_refresh: true)`. A missing or inactive generation is `{:error, :not_found}`. A refresh that cannot fall back to an active, unexpired token is `{:error, {:refresh_failed, reason}}`, where `reason` is a `Tango.RefreshError` term. Put `Tango.RefreshError.to_storage/1` in logs and JSON. Do not treat a stored `last_refresh_failure` string as proof of `invalid_grant`. `Tango.refresh_connection/1` returns the bare `{:error, reason}`.
 - Recheck an existing connection's identity with `Tango.verify_connection_identity(connection_id, tenant_id, {MyApp.ExampleVerifier, []})`.
 
 ## Cleanup

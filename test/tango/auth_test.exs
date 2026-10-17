@@ -126,6 +126,17 @@ defmodule Tango.AuthTest do
     end
   end
 
+  describe "map_oauth_error_code/1" do
+    test "maps unauthorized_client and leaves it outside the exchange audit enum" do
+      assert Tango.Auth.map_oauth_error_code("unauthorized_client") == :unauthorized_client
+
+      assert Tango.Auth.audit_error_code(:unauthorized_client) == :unknown_error
+
+      assert Tango.Auth.audit_error_code({:oauth_error, :unauthorized_client}) ==
+               :unknown_error
+    end
+  end
+
   describe "OAuth2 client configuration" do
     test "build_oauth_client includes JSON serializer" do
       # This test ensures the OAuth2.Client is configured with Jason serializer

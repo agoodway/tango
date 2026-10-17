@@ -158,25 +158,61 @@ defmodule Tango.Schemas.Connection do
       refresh_exhausted: false,
       auth_failures: 0,
       last_auth_failure: nil,
+      next_refresh_at: nil,
       last_used_at: DateTime.utc_now()
     }
 
     changeset(connection, attrs)
   end
 
-  @doc "Records a failed refresh attempt"
-  def record_refresh_failure(connection, error_reason) do
+  @unrecorded_refresh_reasons [
+    :no_refresh_token,
+    :refresh_not_allowed,
+    :persistence_failed,
+    :transaction_failed
+  ]
+
+  @doc """
+  Records a refresh failure on a locked connection.
+
+  Credential failures expire the connection immediately. Client, request, and
+  recorded local failures expire it on the third attempt. Transient failures
+  keep the attempt count and set `next_refresh_at`. Eligibility shortcuts and
+  persistence failures leave the row unchanged.
+  """
+  def record_refresh_failure(%__MODULE__{} = connection, reason)
+      when reason in @unrecorded_refresh_reasons do
+    changeset(connection, %{})
+  end
+
+  def record_refresh_failure(%__MODULE__{} = connection, reason) do
+    case Tango.RefreshError.classify(reason) do
+      :transient -> schedule_refresh_backoff(connection, reason)
+      :credential -> record_refresh_attempt(connection, reason, true)
+      _class -> record_refresh_attempt(connection, reason, false)
+    end
+  end
+
+  defp record_refresh_attempt(connection, reason, immediate_expiry?) do
     attempts = connection.refresh_attempts + 1
-    max_attempts = @max_refresh_attempts
+    expire? = immediate_expiry? or attempts >= @max_refresh_attempts
 
-    attrs = %{
+    changeset(connection, %{
       refresh_attempts: attempts,
-      last_refresh_failure: to_string(error_reason),
-      refresh_exhausted: attempts >= max_attempts,
-      status: if(attempts >= max_attempts, do: :expired, else: connection.status)
-    }
+      last_refresh_failure: Tango.RefreshError.to_storage(reason),
+      refresh_exhausted: expire?,
+      status: if(expire?, do: :expired, else: connection.status),
+      next_refresh_at: nil
+    })
+  end
 
-    changeset(connection, attrs)
+  defp schedule_refresh_backoff(connection, reason) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    changeset(connection, %{
+      last_refresh_failure: Tango.RefreshError.to_storage(reason),
+      next_refresh_at: DateTime.add(now, Tango.RefreshError.backoff_seconds(reason), :second)
+    })
   end
 
   @doc """

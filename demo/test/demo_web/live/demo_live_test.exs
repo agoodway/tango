@@ -6,6 +6,59 @@ defmodule DemoWeb.DemoLiveTest do
   alias Demo.GithubFlow
   alias Tango.Schemas.Connection
 
+  test "refresh outage retains the active generation and displays a safe failure" do
+    provider = Tango.Testing.insert_provider!(%{slug: "github"})
+
+    connection =
+      Tango.Testing.insert_connection!(provider, "demo-user-1", %{account_subject: "42"})
+
+    assert {:noreply, socket} =
+             DemoWeb.DemoLive.handle_async(
+               :fetch_github_profile,
+               {:ok, {:error, {:refresh_failed, {:http_error, 503}}}},
+               profile_socket()
+             )
+
+    assert socket.assigns.connected_provider == "github"
+    assert socket.assigns.expected_connection_id == connection.id
+    assert socket.assigns.expected_subject == "42"
+    assert %Tango.ConnectionInfo{id: id} = socket.assigns.connection_details
+    assert id == connection.id
+    assert socket.assigns.loading_profile == false
+    assert Phoenix.Flash.get(socket.assigns.flash, :error) =~ "http_error:503"
+  end
+
+  test "expired refresh credentials show reconnect instead of a connected button" do
+    provider = Tango.Testing.insert_provider!(%{slug: "github"})
+    Tango.Testing.insert_connection!(provider, "demo-user-1", %{status: :expired})
+
+    assert {:noreply, socket} =
+             DemoWeb.DemoLive.handle_async(
+               :fetch_github_profile,
+               {:ok, {:error, {:refresh_failed, {:oauth_error, :invalid_grant}}}},
+               profile_socket()
+             )
+
+    assert socket.assigns.connected_provider == nil
+    assert socket.assigns.expected_connection_id == nil
+    assert socket.assigns.expected_subject == nil
+    assert socket.assigns.connection_details == nil
+    assert socket.assigns.loading_profile == false
+    assert Phoenix.Flash.get(socket.assigns.flash, :error) =~ "oauth_error:invalid_grant"
+  end
+
+  defp profile_socket do
+    %Phoenix.LiveView.Socket{}
+    |> Phoenix.LiveView.clear_flash()
+    |> Phoenix.Component.assign(%{
+      tenant_id: "demo-user-1",
+      connected_provider: "github",
+      expected_connection_id: -1,
+      expected_subject: "old-subject",
+      loading_profile: true
+    })
+  end
+
   test "renders the connect button with no credential material", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/")
 

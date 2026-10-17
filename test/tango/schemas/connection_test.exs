@@ -300,7 +300,8 @@ defmodule Tango.Schemas.ConnectionTest do
         access_token: "old_token",
         status: :active,
         auth_failures: 2,
-        last_auth_failure: "http_401"
+        last_auth_failure: "http_401",
+        next_refresh_at: ~U[2030-01-01 00:00:00Z]
       }
 
       token_response = %{"access_token" => "new_token", "expires_in" => 3600}
@@ -309,67 +310,100 @@ defmodule Tango.Schemas.ConnectionTest do
 
       assert get_change(changeset, :auth_failures) == 0
       assert get_change(changeset, :last_auth_failure) == nil
+      assert get_field(changeset, :next_refresh_at) == nil
     end
   end
 
   describe "record_refresh_failure/2" do
-    test "records first refresh failure" do
-      connection = %Connection{
-        provider_id: 1,
-        tenant_id: "user-123",
-        access_token: "token",
-        status: :active,
-        refresh_attempts: 0
-      }
+    test "invalid_grant expires immediately and clears backoff" do
+      connection = failure_connection(%{refresh_attempts: 1})
 
-      error = "Invalid refresh token"
-
-      changeset = Connection.record_refresh_failure(connection, error)
+      changeset =
+        Connection.record_refresh_failure(connection, {:oauth_error, :invalid_grant})
 
       assert changeset.valid?
-      assert get_change(changeset, :refresh_attempts) == 1
-      assert get_change(changeset, :last_refresh_failure) == error
-      # refresh_exhausted might not change if it's already false
-      assert get_field(changeset, :refresh_exhausted) == false
-      # Status doesn't change for first failure
-      refute Map.has_key?(changeset.changes, :status)
-    end
-
-    test "marks as exhausted after max attempts" do
-      connection = %Connection{
-        provider_id: 1,
-        tenant_id: "user-123",
-        access_token: "token",
-        status: :active,
-        refresh_attempts: 2
-      }
-
-      error = "Final failure"
-
-      changeset = Connection.record_refresh_failure(connection, error)
-
-      assert changeset.valid?
-      assert get_change(changeset, :refresh_attempts) == 3
-      assert get_change(changeset, :refresh_exhausted) == true
-      # Changed to expired
+      assert get_change(changeset, :refresh_attempts) == 2
       assert get_change(changeset, :status) == :expired
+      assert get_change(changeset, :refresh_exhausted) == true
+      assert get_change(changeset, :last_refresh_failure) == "oauth_error:invalid_grant"
+      assert get_field(changeset, :next_refresh_at) == nil
     end
 
-    test "converts error reason to string" do
-      connection = %Connection{
-        provider_id: 1,
-        tenant_id: "user-123",
-        access_token: "token",
-        status: :active,
-        refresh_attempts: 0
-      }
+    test "client and request failures exhaust on the third attempt" do
+      for reason <- [
+            {:oauth_error, :invalid_client},
+            {:oauth_error, :invalid_request}
+          ] do
+        first = Connection.record_refresh_failure(failure_connection(), reason)
+        assert get_change(first, :refresh_attempts) == 1
+        assert get_field(first, :status) == :active
+        assert get_field(first, :refresh_exhausted) == false
+        assert get_field(first, :next_refresh_at) == nil
+        assert get_change(first, :last_refresh_failure) == "oauth_error:#{elem(reason, 1)}"
 
-      error = "network_timeout"
+        third =
+          failure_connection(%{refresh_attempts: 2})
+          |> Connection.record_refresh_failure(reason)
 
-      changeset = Connection.record_refresh_failure(connection, error)
+        assert get_change(third, :refresh_attempts) == 3
+        assert get_change(third, :status) == :expired
+        assert get_change(third, :refresh_exhausted) == true
+        assert get_field(third, :next_refresh_at) == nil
+      end
+    end
 
-      assert changeset.valid?
-      assert get_change(changeset, :last_refresh_failure) == "network_timeout"
+    test "transient failures keep the attempt count and schedule backoff" do
+      connection = failure_connection(%{refresh_attempts: 2, refresh_exhausted: false})
+      before_time = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      changeset = Connection.record_refresh_failure(connection, {:http_error, 503})
+
+      after_time = DateTime.utc_now() |> DateTime.truncate(:second)
+      next = get_change(changeset, :next_refresh_at)
+
+      assert get_field(changeset, :refresh_attempts) == 2
+      assert get_change(changeset, :refresh_attempts) == nil
+      assert get_field(changeset, :status) == :active
+      assert get_field(changeset, :refresh_exhausted) == false
+      assert get_change(changeset, :last_refresh_failure) == "http_error:503"
+      assert DateTime.compare(next, DateTime.add(before_time, 300, :second)) != :lt
+      assert DateTime.compare(next, DateTime.add(after_time, 300, :second)) != :gt
+    end
+
+    test "recorded local failures keep the three attempt budget" do
+      changeset =
+        Connection.record_refresh_failure(failure_connection(), :invalid_config)
+
+      assert get_change(changeset, :refresh_attempts) == 1
+      assert get_change(changeset, :last_refresh_failure) == "invalid_config"
+      assert get_field(changeset, :next_refresh_at) == nil
+      assert get_field(changeset, :status) == :active
+
+      unknown =
+        Connection.record_refresh_failure(failure_connection(), "invalid_refresh_token")
+
+      assert get_change(unknown, :refresh_attempts) == 1
+      assert get_change(unknown, :last_refresh_failure) == "unknown_refresh_error"
+      assert get_field(unknown, :next_refresh_at) == nil
+    end
+
+    test "eligibility and database failures do not write retry state" do
+      connection = failure_connection(%{refresh_attempts: 2})
+
+      for reason <- [
+            :no_refresh_token,
+            :refresh_not_allowed,
+            :persistence_failed,
+            :transaction_failed
+          ] do
+        changeset = Connection.record_refresh_failure(connection, reason)
+
+        assert get_change(changeset, :refresh_attempts) == nil
+        assert get_change(changeset, :status) == nil
+        assert get_change(changeset, :refresh_exhausted) == nil
+        assert get_change(changeset, :last_refresh_failure) == nil
+        assert get_field(changeset, :next_refresh_at) == connection.next_refresh_at
+      end
     end
   end
 
@@ -661,6 +695,24 @@ defmodule Tango.Schemas.ConnectionTest do
 
       assert Connection.get_raw_access_token(connection) == nil
     end
+  end
+
+  defp failure_connection(attrs \\ %{}) do
+    struct!(
+      Connection,
+      Map.merge(
+        %{
+          provider_id: 1,
+          tenant_id: "user-123",
+          access_token: "token",
+          status: :active,
+          refresh_attempts: 0,
+          refresh_exhausted: false,
+          next_refresh_at: ~U[2030-01-01 00:00:00Z]
+        },
+        attrs
+      )
+    )
   end
 
   # Helper function to extract errors (similar to Phoenix's errors_on/1)

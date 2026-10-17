@@ -25,5 +25,8 @@ tango-*.tar
 # Temporary files, for example, from tests.
 /tmp/
 
+# Local planning and review notes.
+/.superpowers/
+
 # Environment secrets
 .env

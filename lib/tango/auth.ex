@@ -1035,6 +1035,7 @@ defmodule Tango.Auth do
   def map_oauth_error_code("invalid_scope"), do: :invalid_scope
   def map_oauth_error_code("server_error"), do: :server_error
   def map_oauth_error_code("temporarily_unavailable"), do: :temporarily_unavailable
+  def map_oauth_error_code("unauthorized_client"), do: :unauthorized_client
   def map_oauth_error_code(_), do: :provider_error
 
   @doc """
