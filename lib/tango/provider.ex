@@ -8,6 +8,7 @@ defmodule Tango.Provider do
 
   import Ecto.Query, warn: false
   defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
+  alias Tango.RedactedParams
   alias Tango.Schemas.{AuditLog, Provider}
   alias Tango.Schemas.Provider, as: ProviderSchema
 
@@ -89,7 +90,9 @@ defmodule Tango.Provider do
   """
   def create_provider(attrs \\ %{}) do
     Ecto.Multi.new()
-    |> Ecto.Multi.insert(:provider, Provider.changeset(%Provider{}, attrs))
+    |> Ecto.Multi.run(:provider, fn repo, _changes ->
+      RedactedParams.insert(repo, Provider.changeset(%Provider{}, attrs))
+    end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{provider: provider} ->
       AuditLog.log_provider_event(:provider_created, provider, true)
       |> repo.insert()
@@ -112,7 +115,9 @@ defmodule Tango.Provider do
   """
   def create_provider_from_nango(name, nango_config, opts \\ []) do
     Ecto.Multi.new()
-    |> Ecto.Multi.insert(:provider, Provider.from_nango_config(name, nango_config, opts))
+    |> Ecto.Multi.run(:provider, fn repo, _changes ->
+      RedactedParams.insert(repo, Provider.from_nango_config(name, nango_config, opts))
+    end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{provider: provider} ->
       AuditLog.log_provider_event(:provider_created, provider, true, %{
         source: "nango_catalog",
@@ -138,7 +143,9 @@ defmodule Tango.Provider do
   """
   def update_provider(%Provider{config: old_config} = provider, attrs) do
     Ecto.Multi.new()
-    |> Ecto.Multi.update(:provider, Provider.changeset(provider, attrs))
+    |> Ecto.Multi.run(:provider, fn repo, _changes ->
+      RedactedParams.update(repo, Provider.changeset(provider, attrs))
+    end)
     |> Ecto.Multi.run(:audit_log, fn repo, %{provider: updated_provider} ->
       if updated_provider.config != old_config do
         AuditLog.log_provider_event(:provider_updated, updated_provider, true, %{

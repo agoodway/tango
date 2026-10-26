@@ -99,6 +99,9 @@ defmodule Tango do
 
   @doc """
   Verifies a staged authorization candidate with a trusted server callback.
+
+  The verifier's credential includes the candidate's retained token response
+  metadata as `provider_data` (see `Tango.AuthorizationVerifier`).
   """
   defdelegate verify_authorization(handle, tenant_id, verifier, opts), to: Tango.Authorization
 
@@ -110,6 +113,9 @@ defmodule Tango do
 
   @doc """
   Verifies and conditionally binds the identity of an active connection.
+
+  Token response metadata is retained only while a candidate is staged, so the
+  verifier's credential carries `provider_data: %{}`.
   """
   defdelegate verify_connection_identity(connection_id, tenant_id, verifier),
     to: Tango.Authorization

@@ -111,6 +111,7 @@ defmodule Tango.Authorization do
           set: [
             access_token: nil,
             refresh_token: nil,
+            provider_data: %{},
             consumed_at: now
           ]
         )
@@ -412,7 +413,8 @@ defmodule Tango.Authorization do
     |> Authorization.changeset(%{
       consumed_at: DateTime.utc_now() |> DateTime.truncate(:second),
       access_token: nil,
-      refresh_token: nil
+      refresh_token: nil,
+      provider_data: %{}
     })
     |> transaction_repo.update()
     |> normalize_finalize_write()
@@ -618,6 +620,7 @@ defmodule Tango.Authorization do
       token_type: token_response["token_type"],
       token_expires_at: token_expiration(now, token_response["expires_in"]),
       granted_scopes: granted_scopes(token_response),
+      provider_data: token_response["provider_data"] || %{},
       expected_connection_id: session.expected_connection_id,
       expected_subject: session.expected_subject,
       oauth_client_id: session.oauth_client_id,
@@ -811,7 +814,8 @@ defmodule Tango.Authorization do
         |> Authorization.changeset(%{
           consumed_at: DateTime.utc_now() |> DateTime.truncate(:second),
           access_token: nil,
-          refresh_token: nil
+          refresh_token: nil,
+          provider_data: %{}
         })
         |> repo().update()
 
@@ -878,9 +882,21 @@ defmodule Tango.Authorization do
 
   defp bind_locked_connection(_current, _subject), do: repo().rollback(:account_mismatch)
 
-  # The token and scopes handed to an `AuthorizationVerifier`, never the refresh token.
-  defp credential(%{access_token: access_token, granted_scopes: granted_scopes}),
-    do: %{access_token: access_token, granted_scopes: granted_scopes || []}
+  # The token, scopes, and retained token response metadata handed to an
+  # `AuthorizationVerifier`, never the refresh token. Retained metadata lives only
+  # on staged candidates, so a connection's credential carries an empty map.
+  defp credential(%Authorization{} = candidate),
+    do: credential(candidate.access_token, candidate.granted_scopes, candidate.provider_data)
+
+  defp credential(%Connection{access_token: access_token, granted_scopes: granted_scopes}),
+    do: credential(access_token, granted_scopes, %{})
+
+  defp credential(access_token, granted_scopes, provider_data),
+    do: %{
+      access_token: access_token,
+      granted_scopes: granted_scopes || [],
+      provider_data: provider_data || %{}
+    }
 
   defp verifier_options(opts, nil), do: Keyword.delete(opts, :connection_id)
   defp verifier_options(opts, connection_id), do: Keyword.put(opts, :connection_id, connection_id)

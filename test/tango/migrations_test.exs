@@ -28,8 +28,8 @@ defmodule Tango.MigrationsTest do
       assert function_exported?(Tango.Migrations.V03, :down, 1)
     end
 
-    test "current version is 3" do
-      assert Tango.Migration.current_version() == 3
+    test "current version is 4" do
+      assert Tango.Migration.current_version() == 4
     end
 
     test "follows Oban pattern for consuming applications" do

@@ -21,7 +21,14 @@ Verification and finalization are server-only. Browser input cannot choose the
 verifier module or its options.
 
 A verifier receives the candidate's ephemeral access token, the granted scopes,
-and options that only your server code supplies. It returns a stable account
+any token-response metadata the provider is configured to retain, and options
+that only your server code supplies. The credential is always
+`%{access_token: binary, granted_scopes: [String.t()], provider_data: map}`.
+`provider_data` holds the scalar fields listed in the provider's
+`token_response_metadata` (for example Salesforce's `instance_url` or Slack's
+`team.id`) and is `%{}` when none are configured or present. It exists only
+while the candidate is staged: `verify_connection_identity/3` receives
+`provider_data: %{}`. A verifier returns a stable account
 subject and a small allowlist of identity claims. Never return tokens, headers,
 or raw provider payloads from it.
 
@@ -30,7 +37,7 @@ defmodule MyApp.ExampleVerifier do
   @behaviour Tango.AuthorizationVerifier
 
   @impl true
-  def verify(_provider, %{access_token: access_token, granted_scopes: _scopes}, opts) do
+  def verify(_provider, %{access_token: access_token, granted_scopes: _scopes, provider_data: _data}, opts) do
     case MyApp.ExampleClient.fetch_account(access_token) do
       {:ok, %{"id" => id, "display_name" => display_name}} ->
         {:ok,

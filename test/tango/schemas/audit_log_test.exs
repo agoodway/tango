@@ -67,6 +67,23 @@ defmodule Tango.Schemas.AuditLogTest do
       assert "is invalid" in errors[:event_type]
     end
 
+    test "accepts grant metadata and token response error codes" do
+      base_attrs = %{
+        event_type: :token_exchange,
+        tenant_id: "user-123",
+        success: false,
+        occurred_at: DateTime.utc_now()
+      }
+
+      for error_code <- [:invalid_grant_metadata, :invalid_token_response] do
+        changeset =
+          AuditLog.changeset(%AuditLog{}, Map.put(base_attrs, :error_code, error_code))
+
+        assert changeset.valid?, "Error code #{error_code} should be valid"
+        assert get_change(changeset, :error_code) == error_code
+      end
+    end
+
     test "auto-generates occurred_at when not provided" do
       attrs = %{
         event_type: :oauth_start,

@@ -2,7 +2,9 @@ defmodule Demo.GithubVerifier do
   @moduledoc """
   Verifies the GitHub identity behind a staged authorization candidate.
 
-  Runs on the server with the candidate's ephemeral access token. Only the
+  Runs on the server with the candidate's ephemeral credential
+  (`%{access_token, granted_scopes, provider_data}`), of which only the access
+  token is used. Only the
   stable GitHub account id and login are returned as claims; the token never
   leaves this function.
   """

@@ -58,6 +58,23 @@ end
 
 Run `mix ecto.migrate` before deploying code that uses authorization completion.
 
+**Tango 0.4 ships schema version 4 (V04).** It adds
+`tango_authorizations.provider_data`, a JSONB object column (default `'{}'`)
+holding token-response metadata for staged candidates. V04 is required before
+running 0.4 for all providers, and builds on V03. Upgrading from 0.2.x or 0.3.x
+(apply V03 first if you are on 0.1.x):
+
+```elixir
+defmodule MyApp.Repo.Migrations.UpgradeTangoV04 do
+  use Ecto.Migration
+
+  def up, do: Tango.Migration.up(version: 4)
+  def down, do: Tango.Migration.down(version: 3)
+end
+```
+
+Run `mix ecto.migrate` before deploying 0.4 code.
+
 ### Without Ecto migrations
 
 Copy the SQL from `priv/repo/sql/versions/<version>/` into your migration tool
@@ -66,5 +83,5 @@ prefix), and stamp the version marker EctoEvolver would have written, so
 `Tango.Migration.migrated_version/1` agrees with the physical schema:
 
 ```sql
-COMMENT ON TABLE "$SCHEMA$".tango_providers IS 'Tango version=3';
+COMMENT ON TABLE "$SCHEMA$".tango_providers IS 'Tango version=4';
 ```

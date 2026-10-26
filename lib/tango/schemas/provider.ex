@@ -12,7 +12,7 @@ defmodule Tango.Schemas.Provider do
   use Ecto.Schema
   import Ecto.Changeset
 
-  alias Tango.Catalog
+  alias Tango.{Catalog, TokenResponseMetadata}
 
   @type t :: %__MODULE__{
           id: integer() | nil,
@@ -41,7 +41,7 @@ defmodule Tango.Schemas.Provider do
     field(:slug, :string)
     field(:name, :string)
     field(:config, :map, default: %{})
-    field(:client_secret, Tango.Types.EncryptedBinary)
+    field(:client_secret, Tango.Types.EncryptedBinary, redact: true)
     field(:default_scopes, {:array, :string}, default: [])
     field(:active, :boolean, default: true)
     field(:metadata, :map, default: %{})
@@ -216,11 +216,30 @@ defmodule Tango.Schemas.Provider do
             "#{key} requires connection configuration, which Tango does not support"
           )
         end)
+        |> validate_token_response_metadata(metadata)
+        |> validate_authorization_method(metadata)
 
       _ ->
         changeset
     end
   end
+
+  defp validate_token_response_metadata(changeset, metadata) do
+    if TokenResponseMetadata.valid_config?(metadata["token_response_metadata"]),
+      do: changeset,
+      else:
+        add_error(
+          changeset,
+          :metadata,
+          "token_response_metadata must be a list of non-blank field names"
+        )
+  end
+
+  defp validate_authorization_method(changeset, %{"authorization_method" => method})
+       when method not in [nil, "header", "body"],
+       do: add_error(changeset, :metadata, ~s(authorization_method must be "header" or "body"))
+
+  defp validate_authorization_method(changeset, _metadata), do: changeset
 
   defp templated_params?(params) when is_map(params),
     do: Enum.any?(params, fn {_key, value} -> Catalog.unresolved_template?(value) end)
@@ -273,10 +292,17 @@ defmodule Tango.Schemas.Provider do
     * `"token_request_auth_method"` - `"basic"` adds the client credentials to
       the token request body as well as the Basic header
     * `"authorization_method"` - `"header"` sends client credentials only in
-      the Basic header
+      the Basic header; `"body"` sends `client_id` and `client_secret` in the
+      request body without a Basic header, for both code exchange and refresh
+      (combined with `"token_request_auth_method" => "basic"`, the Basic header
+      is sent as well)
     * `"body_format"` - `"json"` sends token requests as JSON instead of a form
     * `"auth_params"`, `"token_params"`, `"refresh_params"` - extra request
       params for the authorization URL, code exchange, and refresh
+    * `"token_response_metadata"` - token response fields retained on a staged
+      authorization candidate and handed to its `Tango.AuthorizationVerifier`
+      as `provider_data` (`nil` when the catalog omits it); see
+      `Tango.TokenResponseMetadata`
   """
   def catalog_metadata(nango_config) do
     %{
@@ -290,7 +316,8 @@ defmodule Tango.Schemas.Provider do
       "disable_pkce" => nango_config["disable_pkce"] == true,
       "token_request_auth_method" => nango_config["token_request_auth_method"],
       "authorization_method" => nango_config["authorization_method"],
-      "body_format" => nango_config["body_format"]
+      "body_format" => nango_config["body_format"],
+      "token_response_metadata" => nango_config["token_response_metadata"]
     }
   end
 

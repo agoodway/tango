@@ -18,7 +18,12 @@ defmodule Demo.GithubVerifierTest do
     :ok
   end
 
-  defp credential, do: %{access_token: "gho_candidate_secret_token", granted_scopes: ["repo"]}
+  defp credential,
+    do: %{
+      access_token: "gho_candidate_secret_token",
+      granted_scopes: ["repo"],
+      provider_data: %{}
+    }
 
   test "returns the account id and login without any credential" do
     Req.Test.stub(Demo.GithubClient, fn conn ->

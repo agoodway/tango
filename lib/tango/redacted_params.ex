@@ -2,7 +2,7 @@ defmodule Tango.RedactedParams do
   @moduledoc false
   # Ecto reports the pre-dump values of every written column (`cast_params`) to
   # SQL logging and telemetry handlers, even for encrypted column types. These
-  # helpers replace token values with `Tango.RedactedParams.Secret`, an opaque
+  # helpers replace credential values with `Tango.RedactedParams.Secret`, an opaque
   # reference that carries no credential bytes, for the duration of an insert
   # or update. The plaintext lives only in the calling process's private
   # storage under that reference; `Tango.Types.EncryptedBinary.dump/1` resolves
@@ -18,12 +18,12 @@ defmodule Tango.RedactedParams do
     defstruct [:ref]
   end
 
-  @token_fields [:access_token, :refresh_token]
+  @credential_fields [:access_token, :refresh_token, :client_secret]
 
-  @doc "Inserts `changeset` with token values kept out of query metadata."
+  @doc "Inserts `changeset` with credential values kept out of query metadata."
   def insert(repo, %Ecto.Changeset{} = changeset), do: write(changeset, &repo.insert/1)
 
-  @doc "Updates `changeset` with token values kept out of query metadata."
+  @doc "Updates `changeset` with credential values kept out of query metadata."
   def update(repo, %Ecto.Changeset{} = changeset), do: write(changeset, &repo.update/1)
 
   @doc false
@@ -39,7 +39,7 @@ defmodule Tango.RedactedParams do
   defp write(%Ecto.Changeset{changes: changes} = changeset, write_fun) do
     {redacted_changes, secrets} =
       Enum.reduce(changes, {%{}, %{}}, fn
-        {field, value}, {acc, secrets} when field in @token_fields and is_binary(value) ->
+        {field, value}, {acc, secrets} when field in @credential_fields and is_binary(value) ->
           secret = %Secret{ref: make_ref()}
           Process.put({__MODULE__, secret.ref}, value)
           {Map.put(acc, field, secret), Map.put(secrets, secret.ref, value)}
@@ -65,8 +65,11 @@ defmodule Tango.RedactedParams do
   defp restore(other, _secrets), do: other
 
   defp unwrap(struct, secrets) do
-    Enum.reduce(@token_fields, struct, fn field, acc ->
-      Map.put(acc, field, unwrap_value(Map.get(acc, field), secrets))
+    Enum.reduce(@credential_fields, struct, fn field, acc ->
+      case Map.fetch(acc, field) do
+        {:ok, value} -> Map.put(acc, field, unwrap_value(value, secrets))
+        :error -> acc
+      end
     end)
   end
 

@@ -387,7 +387,7 @@ defmodule Tango.Auth do
                                           } ->
       with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
            {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
-           {:ok, token_response} <-
+           {:ok, token} <-
              perform_token_exchange(
                oauth_config,
                provider,
@@ -395,7 +395,7 @@ defmodule Tango.Auth do
                authorization_code,
                validated_opts
              ) do
-        {:ok, %{provider: provider, token_response: token_response}}
+        {:ok, %{provider: provider, token_response: convert_token_to_response(token)}}
       else
         {:error, reason} ->
           safe_reason = safe_exchange_error(reason)
@@ -515,6 +515,8 @@ defmodule Tango.Auth do
     end
   end
 
+  defp validate_access_token(nil), do: {:error, :empty_access_token}
+
   defp validate_access_token(""), do: {:error, :empty_access_token}
 
   defp validate_access_token(access_token)
@@ -580,7 +582,7 @@ defmodule Tango.Auth do
              validated_redirect_uri
            ),
          :ok <- validate_access_token(token.access_token) do
-      {:ok, convert_token_to_response(token)}
+      {:ok, token}
     else
       {:error, %OAuth2.Error{reason: reason}} ->
         {:error, reason}
@@ -634,7 +636,8 @@ defmodule Tango.Auth do
 
   @doc """
   Exchanges an authorization code for the session's provider and returns the raw
-  token response.
+  token response, with `"provider_data"` holding the fields the provider's
+  `"token_response_metadata"` retains (see `Tango.TokenResponseMetadata`).
 
   Fails with `{:error, :client_changed}` when the provider's OAuth client no
   longer matches the client recorded on the session. Other failures are reduced
@@ -646,11 +649,13 @@ defmodule Tango.Auth do
     with {:ok, provider} <- Tango.Provider.get_provider_by_id(session.provider_id),
          {:ok, oauth_config} <- Tango.Provider.get_oauth_client(provider),
          true <- oauth_config.client_id == session.oauth_client_id,
-         {:ok, response} <-
+         {:ok, token} <-
            perform_token_exchange(oauth_config, provider, session, authorization_code,
              redirect_uri: redirect_uri
-           ) do
-      {:ok, response}
+           ),
+         {:ok, provider_data} <-
+           Tango.TokenResponseMetadata.extract(token.other_params, provider.metadata) do
+      {:ok, Map.put(convert_token_to_response(token), "provider_data", provider_data)}
     else
       false -> {:error, :client_changed}
       {:error, reason} -> {:error, sanitize_oauth_error(reason)}

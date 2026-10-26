@@ -38,6 +38,7 @@ defmodule Tango.TokenRequestOptionsTest do
       {:ok, body, conn} = Plug.Conn.read_body(conn)
 
       send(parent, {:token_request, conn.req_headers, body})
+      send(parent, {:raw_token_body, body})
 
       conn
       |> Plug.Conn.put_resp_header("content-type", "application/json")
@@ -64,6 +65,22 @@ defmodule Tango.TokenRequestOptionsTest do
       end
 
     {headers, params}
+  end
+
+  # Each credential appears exactly once in the raw request body.
+  defp assert_credentials_once(body_format) do
+    assert_received {:raw_token_body, body}
+
+    case body_format do
+      "json" ->
+        assert length(Regex.scan(~r/"client_id":/, body)) == 1
+        assert length(Regex.scan(~r/"client_secret":/, body)) == 1
+
+      nil ->
+        pairs = body |> String.split("&") |> Enum.map(&(&1 |> String.split("=") |> hd()))
+        assert Enum.count(pairs, &(&1 == "client_id")) == 1
+        assert Enum.count(pairs, &(&1 == "client_secret")) == 1
+    end
   end
 
   defp basic_auth_header,
@@ -117,6 +134,48 @@ defmodule Tango.TokenRequestOptionsTest do
   end
 
   describe "code exchange" do
+    for body_format <- [nil, "json"] do
+      @body_format body_format
+      test "authorization_method body sends credentials only in the #{body_format || "form"} body",
+           %{bypass: bypass} do
+        expect_token_request(bypass)
+
+        provider =
+          create_provider(bypass, %{
+            "authorization_method" => "body",
+            "body_format" => @body_format
+          })
+
+        assert {:ok, _connection} = exchange(provider)
+        {headers, params} = receive_token_request()
+        refute Map.has_key?(headers, "authorization")
+        assert params["client_id"] == "the_client"
+        assert params["client_secret"] == "the_secret"
+        assert params["grant_type"] == "authorization_code"
+        assert params["code"] == "the_code"
+        assert is_binary(params["code_verifier"])
+        assert_credentials_once(@body_format)
+      end
+    end
+
+    test "authorization_method body keeps the Basic header with token_request_auth_method basic",
+         %{bypass: bypass} do
+      expect_token_request(bypass)
+
+      provider =
+        create_provider(bypass, %{
+          "authorization_method" => "body",
+          "token_request_auth_method" => "basic"
+        })
+
+      assert {:ok, _connection} = exchange(provider)
+      {headers, params} = receive_token_request()
+      assert headers["authorization"] == basic_auth_header()
+      assert params["client_id"] == "the_client"
+      assert params["client_secret"] == "the_secret"
+      assert_credentials_once(nil)
+    end
+
     test "keeps the default request: Basic header, form body, client_id and code_verifier",
          %{bypass: bypass} do
       expect_token_request(bypass)
@@ -195,6 +254,48 @@ defmodule Tango.TokenRequestOptionsTest do
   end
 
   describe "refresh" do
+    for body_format <- [nil, "json"] do
+      @body_format body_format
+      test "authorization_method body sends credentials only in the #{body_format || "form"} body",
+           %{bypass: bypass} do
+        expect_token_request(bypass)
+
+        provider =
+          create_provider(bypass, %{
+            "authorization_method" => "body",
+            "body_format" => @body_format
+          })
+
+        assert {:ok, _connection} = refresh(provider)
+        {headers, params} = receive_token_request()
+        refute Map.has_key?(headers, "authorization")
+        assert params["client_id"] == "the_client"
+        assert params["client_secret"] == "the_secret"
+        assert params["grant_type"] == "refresh_token"
+        assert is_binary(params["refresh_token"])
+        assert_credentials_once(@body_format)
+      end
+    end
+
+    test "authorization_method body keeps the Basic header with token_request_auth_method basic",
+         %{bypass: bypass} do
+      expect_token_request(bypass)
+
+      provider =
+        create_provider(bypass, %{
+          "authorization_method" => "body",
+          "token_request_auth_method" => "basic",
+          "body_format" => "json"
+        })
+
+      assert {:ok, _connection} = refresh(provider)
+      {headers, params} = receive_token_request()
+      assert headers["authorization"] == basic_auth_header()
+      assert params["client_id"] == "the_client"
+      assert params["client_secret"] == "the_secret"
+      assert_credentials_once("json")
+    end
+
     test "keeps the default request: Basic header, form body, no client credentials in body",
          %{bypass: bypass} do
       expect_token_request(bypass)

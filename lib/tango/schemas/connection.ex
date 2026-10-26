@@ -80,8 +80,8 @@ defmodule Tango.Schemas.Connection do
     field(:oauth_client_id, :string)
 
     # Encrypted token storage
-    field(:access_token, Tango.Types.EncryptedBinary)
-    field(:refresh_token, Tango.Types.EncryptedBinary)
+    field(:access_token, Tango.Types.EncryptedBinary, redact: true)
+    field(:refresh_token, Tango.Types.EncryptedBinary, redact: true)
     field(:token_type, Ecto.Enum, values: [:bearer, :token], default: :bearer)
     field(:expires_at, :utc_datetime)
     field(:granted_scopes, {:array, :string})

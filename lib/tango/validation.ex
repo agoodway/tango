@@ -8,6 +8,12 @@ defmodule Tango.Validation do
 
   @reserved_auth_params ~w(state redirect_uri client_id response_type scope code_challenge code_challenge_method)
 
+  @sensitive_keys ~w(
+    access_token refresh_token id_token client_secret password api_key
+    session_token code_verifier
+  )
+  @sensitive_key_pattern ~r/token|secret|passw(or)?d|authorization|cookie|header|credential|api.?key|private.?key|signing.?key|encryption.?key|signature|assertion|jwt|nonce|(?:^|[^a-z0-9])code(?:[^a-z0-9]|$)/i
+
   @doc """
   Validates tenant ID format and security.
 
@@ -346,33 +352,56 @@ defmodule Tango.Validation do
   def validate_oauth_url(_), do: {:error, :invalid_oauth_url}
 
   @doc """
+  Returns true when a key name looks like it carries a credential.
+
+  Matches the names Tango never stores or retains (`access_token`,
+  `client_secret`, `code_verifier`, ...) and any name containing a
+  credential-like term such as `token`, `secret`, `password`, `authorization`,
+  `cookie`, `header`, `credential`, `api_key`, `private_key`, `signing_key`,
+  `encryption_key`, `signature`, `assertion`, `jwt`, `nonce`, or a standalone
+  `code` segment (`code`, `auth_code`). Accepts strings and atoms; any other
+  term is not a key name and returns false.
+
+  ## Examples
+
+      iex> Tango.Validation.sensitive_key?("id_token")
+      true
+
+      iex> Tango.Validation.sensitive_key?(:client_secret)
+      true
+
+      iex> Tango.Validation.sensitive_key?("instance_url")
+      false
+
+  """
+  @spec sensitive_key?(term()) :: boolean()
+  def sensitive_key?(key) when is_atom(key), do: sensitive_key?(Atom.to_string(key))
+
+  def sensitive_key?(key) when is_binary(key) do
+    String.downcase(key) in @sensitive_keys or Regex.match?(@sensitive_key_pattern, key)
+  end
+
+  def sensitive_key?(_key), do: false
+
+  @doc """
   Sanitizes and validates metadata map for storage.
+
+  Credential keys (`access_token`, `refresh_token`, `id_token`, `client_secret`,
+  `password`, `api_key`, `session_token`, `code_verifier`) are removed before
+  validation. Other keys are kept, including ones `sensitive_key?/1` matches.
 
   ## Examples
 
       iex> Tango.Validation.validate_metadata(%{"key" => "value"})
       {:ok, %{"key" => "value"}}
       
-      iex> Tango.Validation.validate_metadata(%{sensitive_data: "secret"})
+      iex> Tango.Validation.validate_metadata(%{client_secret: "secret"})
       {:ok, %{}}
 
   """
   def validate_metadata(metadata) when is_map(metadata) do
     # Remove sensitive fields that shouldn't be stored
-    sensitive_keys = [
-      :access_token,
-      :refresh_token,
-      :client_secret,
-      :password,
-      :api_key,
-      :session_token,
-      :code_verifier
-    ]
-
-    sanitized =
-      Enum.reduce(sensitive_keys, metadata, fn key, acc ->
-        Map.delete(acc, key) |> Map.delete(to_string(key))
-      end)
+    sanitized = Map.reject(metadata, fn {key, _value} -> credential_key?(key) end)
 
     # Validate remaining keys and values
     if valid_metadata_map?(sanitized) do
@@ -383,6 +412,10 @@ defmodule Tango.Validation do
   end
 
   def validate_metadata(_), do: {:error, :invalid_metadata}
+
+  defp credential_key?(key) when is_atom(key), do: Atom.to_string(key) in @sensitive_keys
+  defp credential_key?(key) when is_binary(key), do: key in @sensitive_keys
+  defp credential_key?(_key), do: false
 
   # Prevent DoS
   defp valid_metadata_map?(map) when map_size(map) > 100, do: false

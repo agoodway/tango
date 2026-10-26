@@ -22,6 +22,13 @@ defmodule Tango.AuthorizationSchemaTest do
     def down, do: Tango.Migration.down(version: 2, prefix: "tango_v03_authorization_test")
   end
 
+  defmodule UpgradeV4 do
+    use Ecto.Migration
+
+    def up, do: Tango.Migration.up(version: 4, prefix: "tango_v03_authorization_test")
+    def down, do: Tango.Migration.down(version: 3, prefix: "tango_v03_authorization_test")
+  end
+
   test "schemas expose staged authorization fields without a raw provider payload" do
     refute :raw_payload in Authorization.__schema__(:fields)
     assert :account_subject in Connection.__schema__(:fields)
@@ -33,6 +40,9 @@ defmodule Tango.AuthorizationSchemaTest do
 
   test "authorization candidates encrypt tokens and enforce source and handle uniqueness" do
     migrate_v03()
+
+    assert :ok =
+             Migrator.up(Repo, 20_991_026_130_000, UpgradeV4, log: false, migration_lock: false)
 
     provider = insert_provider()
     session = insert_session(provider)

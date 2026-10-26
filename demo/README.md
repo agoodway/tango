@@ -1,12 +1,12 @@
-# Tango 0.3.0 demo
+# Tango 0.4.0 demo
 
 This Phoenix app connects a GitHub account through Tango's staged authorization
 flow, verifies its account identity on the server, and displays the profile and
 audit trail. The browser receives an opaque completion handle, never OAuth tokens.
 
 The demo uses the parent checkout through `{:tango, path: ".."}`. Its package
-version is 0.3.0; the database remains on Tango schema V03. The existing migration
-wrappers install that schema, and this adoption adds no migration.
+version is 0.4.0, which requires Tango schema V04. The migration wrapper
+`priv/repo/migrations/20261026120000_upgrade_tango_v04.exs` installs it.
 
 Connection identity and display data come from `Tango.list_connection_infos/2`.
 Only the server's GitHub API call requests a credential-bearing connection, using

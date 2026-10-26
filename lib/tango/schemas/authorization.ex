@@ -24,6 +24,7 @@ defmodule Tango.Schemas.Authorization do
           completion_origin: String.t() | nil,
           account_subject: String.t() | nil,
           identity_claims: map(),
+          provider_data: map(),
           verified_connection_id: integer() | nil,
           verified_at: DateTime.t() | nil,
           expires_at: DateTime.t() | nil,
@@ -53,6 +54,7 @@ defmodule Tango.Schemas.Authorization do
     :completion_origin,
     :account_subject,
     :identity_claims,
+    :provider_data,
     :verified_connection_id,
     :verified_at,
     :expires_at,
@@ -75,8 +77,8 @@ defmodule Tango.Schemas.Authorization do
     belongs_to(:oauth_session, Tango.Schemas.OAuthSession)
     field(:tenant_id, :string)
     field(:handle_hash, :binary)
-    field(:access_token, Tango.Types.EncryptedBinary)
-    field(:refresh_token, Tango.Types.EncryptedBinary)
+    field(:access_token, Tango.Types.EncryptedBinary, redact: true)
+    field(:refresh_token, Tango.Types.EncryptedBinary, redact: true)
     field(:token_type, :string)
     field(:token_expires_at, :utc_datetime)
     field(:granted_scopes, {:array, :string}, default: [])
@@ -87,6 +89,7 @@ defmodule Tango.Schemas.Authorization do
     field(:completion_origin, :string)
     field(:account_subject, :string)
     field(:identity_claims, :map, default: %{})
+    field(:provider_data, :map, default: %{})
     field(:verified_connection_id, :integer)
     field(:verified_at, :utc_datetime)
     field(:expires_at, :utc_datetime)
@@ -116,6 +119,10 @@ defmodule Tango.Schemas.Authorization do
     |> check_constraint(:access_token,
       name: :tango_authorizations_unconsumed_access_token_check,
       message: "must be present until the authorization is consumed"
+    )
+    |> check_constraint(:provider_data,
+      name: :tango_authorizations_provider_data_check,
+      message: "must be a JSON object"
     )
   end
 end

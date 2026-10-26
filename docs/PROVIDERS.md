@@ -72,17 +72,19 @@ subset of the Nango catalog:
 These are recorded in the provider's `metadata` when it is created (and by
 `sync --update-metadata`), with Nango's defaults when the catalog omits them:
 
-| Catalog field | Effect in Tango |
-| --- | --- |
-| `default_scopes` | Provider `default_scopes` (unless you pass scopes) |
-| `scope_separator` | Joins scopes in the authorization URL (default `" "`) |
-| `authorization_params` | Extra authorization URL params (`metadata["auth_params"]`) |
-| `disable_pkce` | No `code_challenge` on the authorization URL and no `code_verifier` on the exchange |
-| `token_request_auth_method: basic` | Client credentials in the Basic header and in the token request body |
-| `authorization_method: header` | Client credentials only in the Basic header |
-| `body_format: json` | Code exchange and refresh bodies are JSON instead of a form |
-| `token_params` | Extra code-exchange params; also sent on refresh when there are no `refresh_params` |
-| `refresh_params` | Extra refresh params |
+| Catalog field                      | Effect in Tango                                                                                                                                       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default_scopes`                   | Provider `default_scopes` (unless you pass scopes)                                                                                                    |
+| `scope_separator`                  | Joins scopes in the authorization URL (default `" "`)                                                                                                 |
+| `authorization_params`             | Extra authorization URL params (`metadata["auth_params"]`)                                                                                            |
+| `disable_pkce`                     | No `code_challenge` on the authorization URL and no `code_verifier` on the exchange                                                                   |
+| `token_request_auth_method: basic` | Client credentials in the Basic header and in the token request body                                                                                  |
+| `authorization_method: header`     | Client credentials only in the Basic header                                                                                                           |
+| `authorization_method: body`       | Client credentials only in the request body, for both code exchange and refresh; with `token_request_auth_method: basic` the Basic header is kept too |
+| `body_format: json`                | Code exchange and refresh bodies are JSON instead of a form                                                                                           |
+| `token_params`                     | Extra code-exchange params; also sent on refresh when there are no `refresh_params`                                                                   |
+| `refresh_params`                   | Extra refresh params                                                                                                                                  |
+| `token_response_metadata`          | Scalar token-response fields (dotted paths allowed) kept as `provider_data` on the staged candidate and passed to the verifier                        |
 
 The catalog's `grant_type` values are not sent as extra params; Tango always
 uses `authorization_code` for the exchange and `refresh_token` for refresh.
@@ -90,13 +92,72 @@ uses `authorization_code` for the exchange and `refresh_token` for refresh.
 Without these options (and for providers created by hand) the token requests
 keep Tango's default: client credentials in a Basic header plus `client_id` in
 the code-exchange body, form-encoded. Nango's default puts both credentials in
-the body instead; providers that only accept that are not covered.
+the body instead; select `authorization_method: body` explicitly when the
+provider requires body-only authentication.
 
 Not supported: `refresh_url` (Nango uses it only for a few providers with
 custom clients), `token_url` objects keyed by auth mode,
 `authorization_url_skip_encode`, `authorization_url_replacements`,
-`authorization_url_fragment`, `token_response_metadata`, and
+`authorization_url_fragment`, and
 `alternate_access_token_response_path` (Slack user tokens).
+
+### Token-response metadata
+
+Some providers return account details next to the token, such as Salesforce's
+`instance_url` or Slack's `team.id`. List the fields to keep in
+`token_response_metadata`:
+
+```elixir
+metadata: %{"token_response_metadata" => ["instance_url"]}
+# or, for a nested field, a dotted path
+metadata: %{"token_response_metadata" => ["team.id"]}
+```
+
+When a staged authorization is created, Tango reads the listed fields from the
+token response and stores them on the candidate as `provider_data`, a map keyed
+by the configured names (dotted paths stay as the dotted key, for example
+`%{"team.id" => "T012AB3C4"}`). Retention rules:
+
+- Only scalar values (string, number, boolean) are kept. Absent, `null` and
+  nested map or list values are skipped without an error, so `provider_data` can
+  be `%{}`.
+- Secret-like field names (as decided by `Tango.Validation.sensitive_key?/1`,
+  for example names containing `secret`, `token`, `password`, `signature`,
+  `assertion`, `jwt` or `nonce`) are never retained, even if listed. The standard token fields `access_token`,
+  `refresh_token`, `expires_in` and `token_type` are consumed by the OAuth
+  client first and can never be retained.
+- The encoded `provider_data` may not exceed 4 KiB. A larger result fails the
+  exchange with `{:error, :invalid_grant_metadata}`.
+- `token_response_metadata` must be a list of non-blank strings; provider
+  configuration rejects anything else.
+
+Your `Tango.AuthorizationVerifier` receives the data with the credential:
+`%{access_token: token, granted_scopes: scopes, provider_data: data}`. A
+verifier can, for example, check Slack's `team.id` against the workspace the
+tenant expects before returning its verified subject.
+
+`provider_data` lives only on the staged candidate. Tango resets it to `%{}`
+when the candidate is consumed or expired, and it is never copied to the
+connection. `verify_connection_identity/3` runs against an existing connection,
+so its credential always carries `provider_data: %{}`.
+
+### Body client authentication
+
+By default Tango sends client credentials in a Basic header and `client_id` in
+the code-exchange body. For providers that require credentials in the POST body
+only, set Nango's `authorization_method`:
+
+```elixir
+metadata: %{"authorization_method" => "body"}
+```
+
+`client_id` and `client_secret` are then sent in the request body without an
+`Authorization` header, on both code exchange and refresh, as a form or as JSON
+when `body_format` is `"json"`. If `"token_request_auth_method" => "basic"` is
+also set, the Basic header is sent as well. Valid values for
+`authorization_method` are `"header"` and `"body"`. Set `"disable_pkce" => true`
+only when the provider does not support PKCE. Authorization code exchanges are
+not retried.
 
 ## Syncing
 

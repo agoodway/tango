@@ -120,7 +120,7 @@ headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 # With auto-refresh, a refresh that cannot fall back to a still-valid active
 # token returns {:error, {:refresh_failed, reason}}. `reason` is a
 # Tango.RefreshError term. Explicit Tango.refresh_connection/1 returns
-# {:error, reason} with no wrapper. See README "Upgrading to 0.3.0".
+# {:error, reason} with no wrapper. See UPGRADING.md and USAGE.md "Refresh errors".
 {:ok, connection} = Tango.get_connection_for_provider("github", user_id, auto_refresh: true)
 
 # Revoke by struct, or by integer id. A mismatched struct tenant is
