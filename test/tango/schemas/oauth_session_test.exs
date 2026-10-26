@@ -17,6 +17,30 @@ defmodule Tango.Schemas.OAuthSessionTest do
       assert changeset.valid?
     end
 
+    test "casts consume mode and rejects invalid or null completion modes" do
+      attrs = %{
+        provider_id: 1,
+        tenant_id: "user-123",
+        session_token: String.duplicate("a", 32),
+        state: String.duplicate("b", 32),
+        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second)
+      }
+
+      changeset =
+        OAuthSession.changeset(%OAuthSession{}, Map.put(attrs, :completion_mode, "consume"))
+
+      assert changeset.valid?
+      assert get_field(changeset, :completion_mode) == :consume
+
+      for mode <- ["unknown", nil] do
+        changeset =
+          OAuthSession.changeset(%OAuthSession{}, Map.put(attrs, :completion_mode, mode))
+
+        refute changeset.valid?
+        assert changeset.errors[:completion_mode]
+      end
+    end
+
     test "invalid changeset without required fields" do
       changeset = OAuthSession.changeset(%OAuthSession{}, %{})
       refute changeset.valid?
@@ -131,6 +155,7 @@ defmodule Tango.Schemas.OAuthSessionTest do
       session = %OAuthSession{}
       assert session.scopes == []
       assert session.metadata == %{}
+      assert session.completion_mode == :connection
     end
   end
 

@@ -33,6 +33,22 @@ defmodule Tango.Live.OAuthComponentTest do
   end
 
   describe "connect" do
+    test "browser event parameters cannot override the server completion policy", ctx do
+      {:ok, socket} = mount_component(ctx)
+
+      assert {:noreply, _socket} =
+               OAuthComponent.handle_event(
+                 "connect",
+                 %{"completion_mode" => "consume", "expected_subject" => "browser-subject"},
+                 socket
+               )
+
+      session = Repo.one!(OAuthSession)
+      assert session.completion_mode == :connection
+      assert session.expected_subject == nil
+      assert session.expected_connection_id == nil
+    end
+
     test "binds an authorization session to the origin, callback, and a fresh intent", ctx do
       {:ok, socket} = mount_component(ctx)
 

@@ -487,6 +487,41 @@ defmodule Tango.AuthorizationFinalizeTest do
     assert {:error, :repo_mismatch} = operation.(:different_repo, %{})
   end
 
+  test "completion mode overrides and malformed scopes do not consume connection candidates",
+       ctx do
+    {handle, candidate} = candidate(ctx, [])
+    opts = finalize_opts(ctx, candidate, nil)
+
+    for {extra, reason} <- [
+          {[completion_mode: :connection], :invalid_completion_options},
+          {[completion_mode: :consume], :invalid_completion_options},
+          {[required_scopes: nil], :invalid_scopes},
+          {[required_scopes: "records.read"], :invalid_scopes},
+          {[required_scopes: [1]], :invalid_scopes}
+        ] do
+      multi =
+        Tango.multi_finalize_authorization(
+          Ecto.Multi.new(),
+          :grant,
+          handle,
+          ctx.tenant,
+          Keyword.merge(opts, extra)
+        )
+
+      assert {:error, :grant, ^reason, _} = Repo.transaction(multi)
+      refute Repo.get!(Authorization, candidate.id).consumed_at
+      assert Repo.aggregate(Connection, :count) == 0
+    end
+  end
+
+  test "missing finalization intent preserves the intent binding error", ctx do
+    {handle, candidate} = candidate(ctx, [])
+    opts = ctx |> finalize_opts(candidate, nil) |> Keyword.delete(:intent_reference)
+    multi = Tango.multi_finalize_authorization(Ecto.Multi.new(), :grant, handle, ctx.tenant, opts)
+    assert {:error, :grant, :intent_mismatch, _} = Repo.transaction(multi)
+    refute Repo.get!(Authorization, candidate.id).consumed_at
+  end
+
   defp connection(ctx, opts \\ []) do
     attrs = %{
       account_subject: Keyword.get(opts, :account_subject, "subject-1"),

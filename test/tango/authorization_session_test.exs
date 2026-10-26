@@ -49,6 +49,7 @@ defmodule Tango.AuthorizationSessionTest do
                auth_params: %{"prompt" => "consent"}
              )
 
+    assert session.completion_mode == :connection
     assert session.scopes == ["records.read"]
     assert session.oauth_client_id == provider.config["client_id"]
     assert session.auth_params == %{"prompt" => "consent"}
@@ -100,6 +101,22 @@ defmodule Tango.AuthorizationSessionTest do
 
     default_query = default_url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
     assert default_query["scope"] == "provider.default"
+  end
+
+  test "direct sessions return an error for malformed options without writes", %{
+    provider: provider,
+    tenant: tenant
+  } do
+    session_count = Repo.aggregate(Tango.Schemas.OAuthSession, :count)
+    audit_count = Repo.aggregate(Tango.Schemas.AuditLog, :count)
+
+    for opts <- [nil, %{}, :invalid] do
+      assert {:error, :invalid_oauth_options} =
+               Tango.create_session(provider.slug, tenant, opts)
+
+      assert Repo.aggregate(Tango.Schemas.OAuthSession, :count) == session_count
+      assert Repo.aggregate(Tango.Schemas.AuditLog, :count) == audit_count
+    end
   end
 
   test "rejects reserved caller authorization parameters", %{

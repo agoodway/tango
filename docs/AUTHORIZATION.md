@@ -1,8 +1,11 @@
 # Authorization completion
 
-Browser popup callback for Tango 0.2.0. The callback page posts a completion
-handle and intent reference only — not access tokens, refresh tokens, or
-provider payloads.
+Staged authorization supports two server-selected lifecycles. The default
+`completion_mode: :connection` verifies identity and finalizes a stored credential
+connection. Optional `completion_mode: :consume` verifies identity and atomically
+consumes a safe proof without creating or replacing a connection. The callback
+page posts a completion handle and intent reference only; no credential or raw
+provider payload reaches the browser.
 
 ```
 1. Server creates an authorization session
@@ -11,11 +14,11 @@ provider payloads.
    └─ code exchange stores an encrypted candidate (10-minute lifetime)
 3. Callback posts { completion_handle, intent_reference } to the completion origin
 4. Browser forwards the handle to an authenticated app endpoint
-5. App verifies identity, then finalizes in its Ecto.Multi
-   └─ connection and app records commit together or not at all
+5. App verifies identity, then completes in its Ecto.Multi
+   └─ connection or consumed proof and app records commit together or not at all
 ```
 
-## Server: verify and finalize
+## Server: verify and finalize a connection
 
 Verification and finalization are server-only. Browser input cannot choose the
 verifier module or its options.
@@ -26,7 +29,9 @@ that only your server code supplies. The credential is always
 `%{access_token: binary, granted_scopes: [String.t()], provider_data: map}`.
 `provider_data` holds the scalar fields listed in the provider's
 `token_response_metadata` (for example Salesforce's `instance_url` or Slack's
-`team.id`) and is `%{}` when none are configured or present. It exists only
+`team.id`) and is `%{}` when none are configured or present. Hosts must allowlist
+only non-secret identity attributes: a key without the word token is not
+automatically safe. It exists only
 while the candidate is staged: `verify_connection_identity/3` receives
 `provider_data: %{}`. A verifier returns a stable account
 subject and a small allowlist of identity claims. Never return tokens, headers,
@@ -136,6 +141,194 @@ The session's scopes and authorization parameters are authoritative. The
 `redirect_uri` must be registered with the provider and routed to Tango's
 `/callback` endpoint (see [Ready-to-Use OAuth API](API.md)).
 
+## Server: verify and consume a proof
+
+Create the session from authenticated server code, selecting consume mode before
+consent. The provider slug below identifies a synthetic example provider:
+
+```elixir
+{:ok, session} =
+  Tango.create_authorization_session("example", tenant_id,
+    completion_mode: :consume,
+    scopes: ["records.read"],
+    redirect_uri: "https://app.example.com/api/oauth/callback",
+    completion_origin: "https://app.example.com",
+    intent_reference: intent,
+    expected_subject: known_subject
+  )
+
+{:ok, url} = Tango.Auth.authorization_url(session)
+```
+
+`expected_subject` may be omitted for account discovery or be a nonblank string
+bound independently of a connection. Consume mode rejects any non-nil
+`expected_connection_id` with `:invalid_completion_options`. Invalid modes return
+`:invalid_completion_mode`. `Tango.create_session/3` supports direct credential
+connections and rejects consume mode. The callback stages an ordinary encrypted
+token response, still requiring an access token. Browser data, authorization URL
+parameters, and token-response metadata cannot select or override the mode.
+
+The account-link pattern uses the authenticated tenant and a server-selected
+verifier. `AccountVerifier`, `AccountLinks`, and `MyApp.Repo` are host-owned example
+modules, not Tango APIs. The verifier uses the same subject/claims/continuity
+contract shown above, with `continuity: :initial` for consume mode:
+
+```elixir
+with {:ok, _identity} <-
+       Tango.verify_authorization(handle, tenant_id, {AccountVerifier, []},
+         provider: provider_slug,
+         intent_reference: intent
+       ) do
+  Ecto.Multi.new()
+  |> Tango.Authorization.multi_consume_authorization(:proof, handle, tenant_id,
+    provider: provider_slug,
+    intent_reference: intent,
+    required_scopes: ["records.read"]
+  )
+  |> Ecto.Multi.run(:association, fn repo, %{proof: proof} ->
+    AccountLinks.insert_verified(repo, tenant_id, proof.subject)
+  end)
+  |> MyApp.Repo.transaction()
+end
+```
+
+`AccountLinks.insert_verified/3` must lock and revalidate the host's pending
+operation and the authenticated actor's permission in this same transaction.
+Capture the authenticated actor and intent in host code as needed. Likewise, an
+organization onboarding write must check cancellation, operation freshness, actor
+permissions, and any reconnect/version binding under the appropriate host locks.
+If host validation or a later write fails, the transaction rolls back consumption
+and credential erasure, allowing completion to be retried without another code
+exchange. Provider HTTP verification runs before opening the transaction.
+
+### Organization administrator example
+
+This second verifier checks active administrator membership for one
+server-selected organization, returning only its ID and role. All module names
+in this example are host-owned. `OrganizationClient.fetch_membership/3` is a
+host-defined adapter that performs a bounded, read-only authenticated provider
+request, normalizes the response to the synthetic shape below, and returns a
+sanitized error on failure. Its options, including the client module and
+organization ID, must come from trusted server code:
+
+```elixir
+defmodule OrganizationAdminVerifier do
+  @behaviour Tango.AuthorizationVerifier
+
+  @impl true
+  def verify(_provider, %{access_token: access_token}, opts) do
+    organization_id = Keyword.fetch!(opts, :organization_id)
+    client = Keyword.fetch!(opts, :client)
+
+    with {:ok,
+          %{
+            "account_id" => subject,
+            "organization_id" => ^organization_id,
+            "state" => "active",
+            "role" => "admin"
+          }} <- client.fetch_membership(access_token, organization_id, opts),
+         true <- is_binary(subject) and byte_size(subject) > 0 do
+      {:ok,
+       %{
+         subject: subject,
+         claims: %{"organization_id" => organization_id, "role" => "admin"},
+         continuity: :initial
+       }}
+    else
+      _ -> {:error, :invalid_identity}
+    end
+  end
+end
+
+verifier =
+  {OrganizationAdminVerifier,
+   client: OrganizationClient, organization_id: organization_id}
+
+with {:ok, _identity} <-
+       Tango.verify_authorization(handle, tenant_id, verifier,
+         provider: provider_slug,
+         intent_reference: intent
+       ) do
+  Ecto.Multi.new()
+  |> Tango.Authorization.multi_consume_authorization(:proof, handle, tenant_id,
+    provider: provider_slug,
+    intent_reference: intent,
+    required_scopes: ["records.read"]
+  )
+  |> Ecto.Multi.run(:onboarding, fn repo, %{proof: proof} ->
+    OrganizationOnboarding.insert_verified(repo, tenant_id, proof)
+  end)
+  |> MyApp.Repo.transaction()
+end
+```
+
+`OrganizationOnboarding.insert_verified/3` performs the host revalidation described
+above. The executable synthetic example in `authorization_consume_test.exs` uses
+the same verifier logic with Bypass, and rejects inactive administrators and
+active non-administrators. No provider-specific behavior is built into Tango.
+
+### Consume result and errors
+
+The named Multi step returns exactly five keys:
+
+```elixir
+%{
+  provider: provider_slug,
+  subject: verified_subject,
+  claims: safe_claims,
+  granted_scopes: granted_scopes,
+  intent_reference: intent
+}
+```
+
+There is no connection, credential, raw provider data, or completion handle in
+this proof. The preceding `Tango.verify_authorization/4` result remains a
+verification summary with these five identity fields plus
+`expected_connection_id` and `has_refresh_token`; consume mode does not change
+that summary's shape. Use the committed proof for host writes.
+
+`multi_consume_authorization/5` returns an `Ecto.Multi`, not a standalone proof.
+With the example's step name, `Repo.transaction/1` returns
+`{:ok, results}` on success (`results.proof` is the proof) or
+`{:error, :proof, reason, changes_so_far}` on consume failure. A later host step
+failure uses that step's name. Run the transaction on the configured Tango Repo.
+Only `provider`, `intent_reference`, and optional `required_scopes` are accepted.
+Provider and intent are required nonempty strings; scopes default to `[]` and
+must be a list of valid nonblank scope strings. Connection/refresh options,
+`completion_mode`, `expected_subject`, and all other options are rejected even
+when their values are nil or false.
+
+Consume errors are:
+
+- `:repo_mismatch`: transaction Repo differs from the configured Tango Repo.
+- `:invalid_completion_options`: malformed options or unsupported keys.
+- `:invalid_scopes`: malformed scope list.
+- `:invalid_completion`: malformed, unknown, or cross-tenant handle; missing
+  required provider/intent; wrong provider; or inactive provider.
+- `:completion_mode_mismatch`: wrong completion API or altered session/candidate
+  mode or bindings. It does not consume the candidate.
+- `:intent_mismatch`: intent does not match the staged candidate.
+- `:client_changed`: the provider's OAuth client changed.
+- `:completion_consumed`: a handle was already consumed. After cleanup removes
+  its row, replay can return `:invalid_completion` instead.
+- `:expired_completion`: the candidate expired.
+- `:verification_required`: no verified subject is stored.
+- `:token_expired`: the staged token expired.
+- `:account_mismatch`: the verified subject differs from the bound subject.
+- `:missing_scopes`: granted scopes do not cover the required scopes.
+
+Concurrent completion permits one committed consume; another attempt returns
+`:completion_consumed` while the row remains. Existing unrelated credential
+connections are neither replaced nor blockers. Connection finalization rejects
+consume candidates and consumption rejects connection candidates.
+
+Verification is point-in-time and proves only the verifier's actual checks. It
+does not certify fresh password entry, MFA, future membership, or continuing
+access. Consume mode retains no credentials for refresh or background import.
+Nango catalog compatibility covers configuration and OAuth transport; retention
+is a host-selected Tango lifecycle. There is no documented equivalent Nango
+consume API.
+
 ## Browser: consume the completion handle
 
 The callback page posts exactly one of these messages to the session's
@@ -211,7 +404,12 @@ window.addEventListener("message", async (event) => {
 ## Token retention policy
 
 - Tango stores access and refresh tokens only in encrypted columns (AES-GCM). A candidate in `tango_authorizations` lives at most ten minutes and its handle is stored only as a SHA-256 hash.
-- Candidate token columns are set to `NULL` when the candidate is finalized and again by cleanup before the row is deleted.
+- Candidate access and refresh token columns are set to `NULL` and `provider_data`
+  to `%{}` in the same transaction as finalization or consumption, and again by
+  cleanup before the row is deleted. Safe identity fields remain until cleanup.
+  This erases live application records, not backups/WAL, and does not guarantee
+  memory zeroization. Local erasure is distinct from provider-side revocation;
+  consume mode does not revoke the provider authorization.
 - The verifier sees the candidate's access token for the duration of one call. Do not store it, log it, or include it in claims.
 - Ecto SQL logs and telemetry metadata for Tango's token writes carry an opaque placeholder, not the token. Audit rows never contain tokens, codes, provider bodies, raw state, or the completion handle.
 - The `connection` returned by `multi_finalize_authorization/5` holds usable plaintext tokens. Persist only `connection.id` and the identity summary in your own tables. Do not copy tokens into your records, job arguments, logs, error reports, or browser responses.
@@ -259,7 +457,7 @@ config :tango,
 4. Replace any custom JavaScript that read `connection` or token fields from the `oauth_complete` message. Read `completion_handle` and `intent_reference`, check `event.origin` and `event.source`, and send the handle to an authenticated endpoint.
 5. Remove code that copied tokens from the browser or logged callback payloads. Credentials no longer arrive there.
 6. Expect these behavior changes:
-   - The popup `/callback` stages only. It completes sessions created with `Tango.create_authorization_session/3`, not legacy sessions from `Tango.create_session/3`.
+   - The popup `/callback` stages only. It completes sessions created with `Tango.create_authorization_session/3`, not direct-flow sessions from `Tango.create_session/3`.
    - `POST /exchange` ignores `include_token`, never returns credentials, and rejects staged sessions. Staged sessions cannot be completed by `Tango.exchange_code/4` either.
    - `Tango.exchange_code/4` returns `{:oauth_error, category}` instead of a raw `%OAuth2.Response{}` on provider errors.
    - Callback audit rows store a hash of the session state and an error category, not the raw error, description, or state.

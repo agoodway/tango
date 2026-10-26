@@ -25,6 +25,7 @@ defmodule Tango.Authorization do
   # Failures caused by the candidate's own state rather than the verifier's answer.
   @candidate_state_errors ~w(
     invalid_completion expired_completion completion_consumed intent_mismatch stale_connection
+    completion_mode_mismatch
   )a
 
   defp repo, do: Application.get_env(:tango, :repo) || raise("Tango :repo not configured")
@@ -138,24 +139,61 @@ defmodule Tango.Authorization do
     end)
   end
 
+  @doc """
+  Atomically consumes a verified authorization and returns its safe identity proof.
+
+  The named Multi step creates no connection. Host writes and credential erasure
+  commit together, so a later step's failure leaves the authorization reusable.
+  """
+  @spec multi_consume_authorization(Ecto.Multi.t(), term(), binary(), binary(), keyword()) ::
+          Ecto.Multi.t()
+  def multi_consume_authorization(multi, name, handle, tenant_id, opts)
+      when is_binary(handle) and is_binary(tenant_id) and is_list(opts) do
+    Ecto.Multi.run(multi, name, fn transaction_repo, _changes ->
+      consume_in_transaction(transaction_repo, handle, tenant_id, opts)
+    end)
+  end
+
+  def multi_consume_authorization(multi, name, handle, tenant_id, opts) do
+    Ecto.Multi.run(multi, name, fn transaction_repo, _changes ->
+      with :ok <- validate_transaction_repo(transaction_repo) do
+        validate_completion_input(handle, tenant_id, opts)
+      end
+    end)
+  end
+
+  defp consume_in_transaction(transaction_repo, handle, tenant_id, opts) do
+    with :ok <- validate_transaction_repo(transaction_repo),
+         :ok <- validate_completion_input(handle, tenant_id, opts),
+         :ok <- validate_completion_options(opts, :consume),
+         {:ok, hash} <- decode_handle(handle),
+         {:ok, candidate, provider} <- lock_candidate(hash, tenant_id),
+         :ok <- validate_completion_mode(candidate, :consume),
+         :ok <- validate_candidate_bindings(candidate, provider, opts),
+         :ok <- validate_verification_provider(candidate, provider),
+         :ok <- validate_candidate_state(candidate, tenant_id),
+         :ok <- validate_consumed_subject(candidate),
+         :ok <- validate_required_scopes(candidate, opts),
+         {:ok, consumed} <- consume_candidate(transaction_repo, candidate) do
+      {:ok, completion_summary(consumed, provider.slug)}
+    end
+  end
+
   defp finalize_in_transaction(transaction_repo, handle, tenant_id, opts) do
     with :ok <- validate_transaction_repo(transaction_repo),
+         :ok <- validate_completion_options(opts, :connection),
          {:ok, hash} <- decode_handle(handle),
-         %Authorization{} = routing_candidate <-
-           transaction_repo.get_by(Authorization, handle_hash: hash, tenant_id: tenant_id),
+         {:ok, routing} <- load_candidate_routing(hash, tenant_id),
+         :ok <- validate_completion_mode(routing, :connection),
          :ok <-
            Tango.ConnectionLock.lock(
              transaction_repo,
-             routing_candidate.provider_id,
-             routing_candidate.tenant_id
+             routing.provider_id,
+             routing.tenant_id
            ),
-         %Authorization{} = candidate <-
-           from(candidate in Authorization,
-             where: candidate.id == ^routing_candidate.id,
-             lock: "FOR UPDATE"
-           )
-           |> transaction_repo.one(),
-         %Provider{} = provider <- transaction_repo.get(Provider, candidate.provider_id),
+         {:ok, candidate, provider} <- lock_candidate(hash, tenant_id),
+         :ok <- validate_completion_mode(candidate, :connection),
+         :ok <- validate_verification_snapshot(routing, candidate),
          :ok <- validate_finalize_candidate(candidate, provider, tenant_id, opts),
          {:ok, current} <- lock_expected_generation(transaction_repo, candidate),
          :ok <- validate_finalize_generation(transaction_repo, candidate, current),
@@ -167,20 +205,68 @@ defmodule Tango.Authorization do
       {:ok,
        %{
          connection: connection,
-         authorization: %{
-           provider: provider.slug,
-           subject: consumed.account_subject,
-           claims: consumed.identity_claims,
-           granted_scopes: consumed.granted_scopes,
-           intent_reference: consumed.intent_reference
-         }
+         authorization: completion_summary(consumed, provider.slug)
        }}
-    else
-      nil -> {:error, :invalid_completion}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :invalid_completion}
     end
   end
+
+  defp validate_completion_input(handle, tenant_id, opts)
+       when is_binary(handle) and is_binary(tenant_id) do
+    if is_list(opts), do: :ok, else: {:error, :invalid_completion_options}
+  end
+
+  defp validate_completion_input(_handle, _tenant_id, _opts),
+    do: {:error, :invalid_completion}
+
+  defp validate_completion_options(opts, mode) do
+    with true <- Keyword.keyword?(opts),
+         false <- invalid_completion_options?(opts, mode),
+         :ok <- validate_required_completion_options(opts, mode) do
+      validate_completion_scopes(Keyword.get(opts, :required_scopes, []))
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_completion_options}
+    end
+  end
+
+  defp validate_completion_scopes([]), do: :ok
+
+  defp validate_completion_scopes([scope | rest]) do
+    with :ok <- Tango.Validation.validate_scopes([scope]) do
+      validate_completion_scopes(rest)
+    end
+  end
+
+  defp validate_completion_scopes(_scopes), do: {:error, :invalid_scopes}
+
+  defp validate_required_completion_options(opts, :consume) do
+    with {:ok, _provider} <- required_option(opts, :provider),
+         {:ok, _intent} <- required_option(opts, :intent_reference) do
+      :ok
+    end
+  end
+
+  defp validate_required_completion_options(_opts, :connection), do: :ok
+
+  defp invalid_completion_options?(opts, :consume),
+    do:
+      Enum.any?(Keyword.keys(opts), &(&1 not in [:provider, :intent_reference, :required_scopes]))
+
+  defp invalid_completion_options?(opts, :connection),
+    do: Keyword.has_key?(opts, :completion_mode)
+
+  defp validate_completion_mode(%Authorization{completion_mode: mode}, mode), do: :ok
+  defp validate_completion_mode(_candidate, _mode), do: {:error, :completion_mode_mismatch}
+
+  defp validate_consumed_subject(%Authorization{expected_subject: nil}), do: :ok
+
+  defp validate_consumed_subject(%Authorization{
+         expected_subject: subject,
+         account_subject: subject
+       }),
+       do: :ok
+
+  defp validate_consumed_subject(_candidate), do: {:error, :account_mismatch}
 
   defp validate_transaction_repo(transaction_repo) do
     if transaction_repo == repo(), do: :ok, else: {:error, :repo_mismatch}
@@ -215,16 +301,24 @@ defmodule Tango.Authorization do
   end
 
   defp validate_candidate_bindings(candidate, provider, opts) do
-    expected_id = Keyword.get(opts, :expected_connection_id)
-
     cond do
       candidate.intent_reference != Keyword.get(opts, :intent_reference) ->
         {:error, :intent_mismatch}
 
-      provider.slug != Keyword.get(opts, :provider) ->
+      not match?(%Provider{}, provider) or provider.slug != Keyword.get(opts, :provider) ->
         {:error, :invalid_completion}
 
-      candidate.expected_connection_id != expected_id ->
+      true ->
+        validate_connection_bindings(candidate, provider, opts)
+    end
+  end
+
+  defp validate_connection_bindings(%Authorization{completion_mode: :consume}, _provider, _opts),
+    do: :ok
+
+  defp validate_connection_bindings(candidate, provider, opts) do
+    cond do
+      candidate.expected_connection_id != Keyword.get(opts, :expected_connection_id) ->
         {:error, :stale_connection}
 
       candidate.verified_connection_id != candidate.expected_connection_id ->
@@ -612,6 +706,7 @@ defmodule Tango.Authorization do
 
     attrs = %{
       provider_id: session.provider_id,
+      completion_mode: session.completion_mode,
       oauth_session_id: session.id,
       tenant_id: session.tenant_id,
       handle_hash: handle_hash(handle),
@@ -657,8 +752,7 @@ defmodule Tango.Authorization do
   end
 
   defp load_candidate_in_transaction(hash, tenant_id, intent_reference, provider_slug) do
-    with %Authorization{} = candidate <- candidate_query(hash, tenant_id) |> repo().one(),
-         provider = repo().get(Provider, candidate.provider_id),
+    with {:ok, candidate, provider} <- lock_candidate(hash, tenant_id),
          :ok <- validate_candidate(candidate, provider, intent_reference, provider_slug),
          :ok <- validate_generation(candidate) do
       {candidate, provider}
@@ -676,16 +770,18 @@ defmodule Tango.Authorization do
          verification
        ) do
     repo().transaction(fn ->
-      current =
-        candidate_query(candidate.handle_hash, tenant_id)
-        |> where([candidate], candidate.id == ^candidate.id)
-        |> repo().one()
-
-      provider = current && repo().get(Provider, current.provider_id)
-
-      with %Authorization{} = current <- current,
+      with {:ok, current, provider} <- lock_candidate(candidate.handle_hash, tenant_id),
+           :ok <- validate_verification_snapshot(candidate, current),
            :ok <- validate_candidate(current, provider, intent_reference, provider_slug),
            :ok <- validate_generation(current),
+           :ok <-
+             validate_verification(
+               %{
+                 connection_id: current.expected_connection_id,
+                 subject: current.expected_subject
+               },
+               verification
+             ),
            {:ok, verified} <-
              current
              |> Authorization.changeset(%{
@@ -704,6 +800,59 @@ defmodule Tango.Authorization do
     |> unwrap_transaction()
   end
 
+  defp load_candidate_routing(hash, tenant_id) do
+    case repo().get_by(Authorization, handle_hash: hash, tenant_id: tenant_id) do
+      %Authorization{} = candidate -> {:ok, candidate}
+      nil -> {:error, :invalid_completion}
+    end
+  end
+
+  # Connection finalization acquires its generation lock before this reload.
+  # Session locks precede candidate locks so verification and session cleanup
+  # cannot wait on one another in opposite order.
+  defp lock_candidate(hash, tenant_id) do
+    with {:ok, routing} <- load_candidate_routing(hash, tenant_id),
+         %OAuthSession{} = session <-
+           from(session in OAuthSession,
+             where: session.id == ^routing.oauth_session_id,
+             lock: "FOR UPDATE"
+           )
+           |> repo().one(),
+         %Authorization{} = candidate <- candidate_query(hash, tenant_id) |> repo().one(),
+         :ok <- validate_candidate_session(candidate, session) do
+      {:ok, candidate, lock_candidate_provider(candidate)}
+    else
+      nil -> {:error, :invalid_completion}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lock_candidate_provider(%Authorization{completion_mode: :consume} = candidate) do
+    from(provider in Provider, where: provider.id == ^candidate.provider_id, lock: "FOR UPDATE")
+    |> repo().one()
+  end
+
+  defp lock_candidate_provider(candidate), do: repo().get(Provider, candidate.provider_id)
+
+  defp validate_candidate_session(candidate, session) do
+    fields = ~w(completion_mode provider_id tenant_id oauth_client_id expected_connection_id
+                expected_subject intent_reference completion_origin)a
+
+    if candidate.oauth_session_id == session.id and
+         Enum.all?(fields, &(Map.fetch!(candidate, &1) == Map.fetch!(session, &1))),
+       do: :ok,
+       else: {:error, :completion_mode_mismatch}
+  end
+
+  defp validate_verification_snapshot(candidate, current) do
+    fields = ~w(id oauth_session_id completion_mode provider_id tenant_id oauth_client_id
+                expected_connection_id expected_subject intent_reference completion_origin)a
+
+    if Enum.all?(fields, &(Map.fetch!(candidate, &1) == Map.fetch!(current, &1))),
+      do: :ok,
+      else: {:error, :completion_mode_mismatch}
+  end
+
   defp candidate_query(hash, tenant_id) do
     from(candidate in Authorization,
       where: candidate.handle_hash == ^hash,
@@ -719,9 +868,24 @@ defmodule Tango.Authorization do
       not match?(%Provider{}, provider) -> {:error, :invalid_completion}
       provider.slug != provider_slug -> {:error, :invalid_completion}
       candidate.intent_reference != intent_reference -> {:error, :intent_mismatch}
+      true -> validate_verification_provider(candidate, provider)
+    end
+  end
+
+  defp validate_verification_provider(
+         %Authorization{completion_mode: :consume} = candidate,
+         provider
+       ) do
+    cond do
+      not provider.active -> {:error, :invalid_completion}
+      oauth_client_id(provider) != candidate.oauth_client_id -> {:error, :client_changed}
       true -> :ok
     end
   end
+
+  defp validate_verification_provider(_candidate, _provider), do: :ok
+
+  defp validate_generation(%Authorization{completion_mode: :consume}), do: :ok
 
   defp validate_generation(%Authorization{expected_connection_id: nil} = candidate) do
     if other_active_generation?(repo(), candidate, nil),
@@ -757,7 +921,9 @@ defmodule Tango.Authorization do
 
   defp validate_verification(_expected, _verification), do: {:error, :invalid_claims}
 
-  defp validate_continuity(%{connection_id: nil}, :initial, _subject), do: :ok
+  defp validate_continuity(%{connection_id: nil, subject: expected}, :initial, subject) do
+    if is_nil(expected) or expected == subject, do: :ok, else: {:error, :account_mismatch}
+  end
 
   defp validate_continuity(%{connection_id: id, subject: expected}, {:connection, id}, subject)
        when is_integer(id) do
@@ -824,16 +990,23 @@ defmodule Tango.Authorization do
     end
   end
 
-  defp authorization_summary(candidate, provider_slug) do
+  defp completion_summary(candidate, provider_slug) do
     %{
       provider: provider_slug,
       subject: candidate.account_subject,
       claims: candidate.identity_claims,
       granted_scopes: candidate.granted_scopes,
-      expected_connection_id: candidate.expected_connection_id,
-      intent_reference: candidate.intent_reference,
-      has_refresh_token: not is_nil(candidate.refresh_token)
+      intent_reference: candidate.intent_reference
     }
+  end
+
+  defp authorization_summary(candidate, provider_slug) do
+    candidate
+    |> completion_summary(provider_slug)
+    |> Map.merge(%{
+      expected_connection_id: candidate.expected_connection_id,
+      has_refresh_token: not is_nil(candidate.refresh_token)
+    })
   end
 
   defp load_connection(connection_id, tenant_id) do

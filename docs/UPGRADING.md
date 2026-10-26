@@ -2,6 +2,57 @@
 
 Newest version first. For new installs, see [SETUP.md](SETUP.md).
 
+## Upgrading to 0.4.1
+
+Use `{:tango, "~> 0.4.1"}`. Ordinary direct credential connections and staged
+connection finalization remain supported, with connection completion the default.
+Opt-in `completion_mode: :consume` uses the same staged verification contract and
+`Tango.Authorization.multi_consume_authorization/5` to commit a safe identity proof
+without retaining a connection. See [Authorization completion](AUTHORIZATION.md)
+for account-link and organization administrator examples, exact return/errors,
+and host revalidation responsibilities.
+
+### Revised V04 deployment exception
+
+0.4.1 retains schema version 4 and revises V04 in place under the explicitly
+authorized assumption that 0.4.0 has no external consumers. There is no V05.
+Besides the existing `provider_data` column/check, V04 now installs
+`completion_mode TEXT NOT NULL DEFAULT 'connection'` on both
+`tango_oauth_sessions` and `tango_authorizations`, checks both modes against
+`connection`/`consume`, and forbids connection bindings on consume rows. Existing
+rows default to connection mode. Every 0.4.1 deployment requires this shape even
+when consume mode is unused.
+
+- Fresh installs apply migrations through revised V04 with 0.4.1 installed.
+- Databases at V03 use the pinned V04 wrapper below, with 0.4.1 installed before
+  applying the migration. Apply V03 first for older databases.
+- Known developer databases already reporting version 4 need an explicit
+  [schema-shape check](SETUP.md#checking-an-already-applied-v04). A version marker
+  alone is insufficient. The wrapper does not rerun applied V04, and installing
+  a dependency does not apply DDL. Reconcile missing columns/checks with a reviewed
+  targeted host migration when retaining data, or recreate a disposable developer
+  database fresh and apply migrations through revised V04. The current wrapper's
+  down migration cannot run on the original V04 shape because its guard queries
+  the missing `completion_mode` columns. Do not use it to roundtrip that schema.
+  Tango adds no automatic runtime schema repair.
+
+### V04 rollback guard
+
+V04 rollback takes `ACCESS EXCLUSIVE` locks on `tango_oauth_sessions`, then
+`tango_authorizations`, held through migration completion. It checks for pending
+consume work before any DDL and fails if an unexpired consume session has not
+been exchanged or an unexpired consume candidate is unconsumed. This prevents
+pending consent from being reinterpreted as connection creation. These locks
+block concurrent activity on those tables; schedule host migrations accordingly.
+
+Complete pending operations or let them expire, then run the normal authorization
+and session cleanup APIs before retrying. Consumed or expired temporary rows may
+be removed by those APIs. Never revoke stored connections to bypass the guard.
+Manual SQL rollback must keep every statement in one transaction so locks remain
+held through DDL. This rollback requires the revised V04 schema, including both
+`completion_mode` columns; it is not a reconciliation path for original V04.
+Rollback also removes `provider_data`; assess that data loss before rolling back.
+
 ## Upgrading to 0.4
 
 V04 is mandatory for every 0.4 install, whether or not a provider uses

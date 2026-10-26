@@ -31,7 +31,7 @@ Add `tango` to your dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:tango, "~> 0.4.0"}
+    {:tango, "~> 0.4.1"}
   ]
 end
 ```
@@ -103,7 +103,22 @@ redirect_uri = "https://yourapp.com/auth/callback"
 headers = [{"Authorization", "Bearer #{connection.access_token}"}]
 ```
 
-For browser popups, see [AUTHORIZATION.md](docs/AUTHORIZATION.md).
+The direct server-side flow above stores a credential connection. For browser
+popups, staged connection completion is the default: verify the account on your
+server, then finalize a credential connection together with your host writes.
+
+For a point-in-time account link or organization administrator check, opt into
+`completion_mode: :consume` when creating an authorization session. After server
+verification, `Tango.Authorization.multi_consume_authorization/5` commits a safe
+identity proof with your host writes and erases the staged credentials without
+creating a connection. See [AUTHORIZATION.md](docs/AUTHORIZATION.md) for both
+lifecycles and host-owned examples. Consume mode supports neither refreshed
+credentials nor background imports.
+
+Nango catalog compatibility covers provider configuration and OAuth transport.
+Tango makes credential retention an explicit host-selected policy; this
+verify-and-consume API is a Tango extension with no documented Nango consume API
+equivalent. Local credential erasure does not revoke the provider's authorization.
 
 ## Documentation
 
@@ -127,4 +142,4 @@ mix quality
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](https://github.com/agoodway/tango/blob/main/LICENSE).

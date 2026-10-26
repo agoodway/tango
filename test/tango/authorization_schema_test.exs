@@ -36,6 +36,8 @@ defmodule Tango.AuthorizationSchemaTest do
     assert :completion_origin in OAuthSession.__schema__(:fields)
     assert :expected_connection_id in OAuthSession.__schema__(:fields)
     assert :auth_params in OAuthSession.__schema__(:fields)
+    assert :completion_mode in OAuthSession.__schema__(:fields)
+    assert :completion_mode in Authorization.__schema__(:fields)
   end
 
   test "authorization candidates encrypt tokens and enforce source and handle uniqueness" do
@@ -105,6 +107,70 @@ defmodule Tango.AuthorizationSchemaTest do
 
     assert {"must be present until the authorization is consumed", _} =
              unconsumed_without_token.errors[:access_token]
+  end
+
+  test "completion modes default to connection and consume rows reject connection bindings" do
+    migrate_v03()
+
+    assert :ok =
+             Migrator.up(Repo, 20_991_026_130_000, UpgradeV4, log: false, migration_lock: false)
+
+    provider = insert_provider()
+    session = insert_session(provider)
+    authorization = insert_authorization(provider, session, %{})
+
+    assert Repo.get!(OAuthSession, session.id, prefix: @prefix).completion_mode == :connection
+
+    assert Repo.get!(Authorization, authorization.id, prefix: @prefix).completion_mode ==
+             :connection
+
+    consume_session =
+      provider
+      |> insert_session()
+      |> OAuthSession.changeset(%{completion_mode: :consume})
+      |> Repo.update!()
+
+    consume = insert_authorization(provider, consume_session, %{completion_mode: :consume})
+
+    assert Repo.get!(OAuthSession, consume_session.id, prefix: @prefix).completion_mode ==
+             :consume
+
+    assert Repo.get!(Authorization, consume.id, prefix: @prefix).completion_mode == :consume
+
+    for mode <- ["unknown", nil] do
+      changeset = authorization_changeset(provider, consume_session, %{completion_mode: mode})
+      refute changeset.valid?
+      assert changeset.errors[:completion_mode]
+    end
+
+    connection =
+      %Connection{}
+      |> Ecto.put_meta(prefix: @prefix)
+      |> Connection.changeset(%{
+        provider_id: provider.id,
+        tenant_id: "tenant-authorization",
+        access_token: "synthetic"
+      })
+      |> Repo.insert!()
+
+    assert {:error, invalid_session} =
+             session
+             |> OAuthSession.changeset(%{
+               completion_mode: :consume,
+               expected_connection_id: connection.id
+             })
+             |> Repo.update()
+
+    assert invalid_session.errors[:completion_mode]
+
+    for field <- [:expected_connection_id, :verified_connection_id] do
+      assert {:error, invalid_candidate} =
+               consume
+               |> Authorization.changeset(%{field => connection.id})
+               |> Repo.update()
+
+      assert invalid_candidate.errors[:completion_mode]
+    end
   end
 
   test "V03 migrates up, rolls back to V02, and reapplies in a dedicated prefix" do

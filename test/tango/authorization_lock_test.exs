@@ -8,6 +8,20 @@ defmodule Tango.AuthorizationLockTest do
   alias Tango.Schemas.{AuditLog, Authorization, Connection, OAuthSession, Provider}
   alias Tango.TestRepo, as: Repo
 
+  defmodule PausedVerifier do
+    @behaviour Tango.AuthorizationVerifier
+
+    @impl true
+    def verify(_provider, _credential, opts) do
+      send(opts[:parent], {:verifier_ready, self()})
+
+      receive do
+        :release ->
+          {:ok, %{subject: "subject-1", claims: %{}, continuity: :initial}}
+      end
+    end
+  end
+
   setup do
     previous_origins = Application.get_env(:tango, :allowed_completion_origins)
     Application.put_env(:tango, :allowed_completion_origins, ["https://app.example.test"])
@@ -134,6 +148,65 @@ defmodule Tango.AuthorizationLockTest do
              end)
   end
 
+  test "public generation prelock and plain finalizer serialize the same handle" do
+    parent = self()
+
+    {provider, tenant, handle, candidate} =
+      Sandbox.unboxed_run(Repo, fn ->
+        provider = Factory.create_provider()
+        tenant = Factory.tenant_id("prelocked-finalize")
+        {handle, candidate} = initial_candidate(provider, tenant, "prelocked")
+        {provider, tenant, handle, candidate}
+      end)
+
+    on_exit(fn -> cleanup_provider(provider.id) end)
+
+    multi =
+      Tango.multi_finalize_authorization(
+        Ecto.Multi.new(),
+        :grant,
+        handle,
+        tenant,
+        finalize_opts(provider, candidate)
+      )
+
+    holder =
+      database_task(fn ->
+        Repo.transaction(fn ->
+          assert :ok = Tango.lock_connection_generations(tenant, [provider.slug])
+          send(parent, {:generation_prelocked, self()})
+
+          receive do
+            :finalize -> Repo.transaction(multi)
+          end
+        end)
+      end)
+
+    {holder_backend, holder_pid} = start_database_task(holder)
+    assert_receive {:generation_prelocked, ^holder_pid}, 5_000
+    waiter = database_task(fn -> Repo.transaction(multi) end)
+    {waiter_backend, _} = start_database_task(waiter)
+    assert waiter_backend != holder_backend
+    await_blocked(waiter_backend, holder_backend)
+    send(holder_pid, :finalize)
+
+    assert {:ok, {:ok, %{grant: _}}} = Task.await(holder, 5_000)
+    assert {:error, :grant, :completion_consumed, _} = Task.await(waiter, 5_000)
+    assert_consumed(candidate)
+
+    assert 1 ==
+             Sandbox.unboxed_run(Repo, fn ->
+               Repo.aggregate(
+                 from(c in Connection,
+                   where: c.provider_id == ^provider.id,
+                   where: c.tenant_id == ^tenant,
+                   where: c.status == :active
+                 ),
+                 :count
+               )
+             end)
+  end
+
   test "bulk revocation mutates only provider and tenant keys locked by its transaction" do
     parent = self()
 
@@ -197,7 +270,318 @@ defmodule Tango.AuthorizationLockTest do
              Sandbox.unboxed_run(Repo, fn -> Repo.get!(Connection, second.id).status end)
   end
 
-  defp initial_candidate(provider, tenant_id, suffix) do
+  test "two consumers serialize one proof and one replay failure" do
+    {provider, tenant, handle, candidate} = consume_fixture()
+    parent = self()
+
+    winner =
+      database_task(fn -> held_consumption(provider, tenant, handle, candidate, parent) end)
+
+    {winner_backend, _} = start_database_task(winner)
+    assert_receive {:consumed_pending, winner_pid}, 5_000
+
+    loser =
+      database_task(fn ->
+        Repo.transaction(consume_multi(provider, tenant, handle, candidate))
+      end)
+
+    {loser_backend, _} = start_database_task(loser)
+    assert loser_backend != winner_backend
+    await_blocked(loser_backend, winner_backend)
+    send(winner_pid, :commit)
+    results = Task.await_many([winner, loser], 5_000)
+
+    assert Enum.count(results, &match?({:ok, %{proof: _}}, &1)) == 1
+    assert Enum.count(results, &match?({:error, :proof, :completion_consumed, _}, &1)) == 1
+    assert_consumed(candidate)
+    assert_no_connections(provider)
+  end
+
+  test "host rollback releases a waiting consumer with credentials intact" do
+    {provider, tenant, handle, candidate} = consume_fixture()
+    parent = self()
+
+    holder =
+      database_task(fn -> held_consumption(provider, tenant, handle, candidate, parent) end)
+
+    {holder_backend, _} = start_database_task(holder)
+    assert_receive {:consumed_pending, holder_pid}, 5_000
+
+    waiter =
+      database_task(fn ->
+        Repo.transaction(consume_multi(provider, tenant, handle, candidate))
+      end)
+
+    {waiter_backend, _} = start_database_task(waiter)
+    await_blocked(waiter_backend, holder_backend)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      stored = Repo.get!(Authorization, candidate.id)
+      refute stored.consumed_at
+      assert stored.access_token == candidate.access_token
+      assert stored.refresh_token == candidate.refresh_token
+      assert stored.provider_data == candidate.provider_data
+    end)
+
+    send(holder_pid, :rollback)
+    assert {:error, :host_write, :host_rejected, %{proof: _}} = Task.await(holder)
+    assert {:ok, %{proof: %{subject: "subject-1"}}} = Task.await(waiter)
+    assert_consumed(candidate)
+    assert_no_connections(provider)
+  end
+
+  test "a verifier returning after committed consumption cannot resurrect credentials" do
+    {provider, tenant, handle, candidate} = consume_fixture()
+    parent = self()
+
+    verifier =
+      database_task(fn ->
+        Tango.verify_authorization(handle, tenant, {PausedVerifier, parent: parent},
+          provider: provider.slug,
+          intent_reference: candidate.intent_reference
+        )
+      end)
+
+    start_database_task(verifier)
+    assert_receive {:verifier_ready, verifier_pid}, 5_000
+
+    assert {:ok, %{proof: _}} =
+             Sandbox.unboxed_run(Repo, fn ->
+               Repo.transaction(consume_multi(provider, tenant, handle, candidate))
+             end)
+
+    send(verifier_pid, :release)
+    assert {:error, :completion_consumed} = Task.await(verifier)
+    assert_consumed(candidate)
+    assert_no_connections(provider)
+  end
+
+  test "provider mutations block consumers and invalidate a verifier's stale result" do
+    for {change, reason} <- [
+          {%{active: false}, :invalid_completion},
+          {%{config: %{"client_id" => "rotated-client"}}, :client_changed}
+        ] do
+      {provider, tenant, handle, candidate} = consume_fixture()
+      parent = self()
+      change = Map.update(change, :config, provider.config, &Map.merge(provider.config, &1))
+
+      verifier =
+        database_task(fn ->
+          Tango.verify_authorization(handle, tenant, {PausedVerifier, parent: parent},
+            provider: provider.slug,
+            intent_reference: candidate.intent_reference
+          )
+        end)
+
+      start_database_task(verifier)
+      assert_receive {:verifier_ready, verifier_pid}, 5_000
+
+      mutation =
+        database_task(fn ->
+          Repo.transaction(fn ->
+            {:ok, _} = Tango.update_provider(provider, change)
+            send(parent, {:provider_mutated, self()})
+
+            receive do
+              :commit -> :ok
+            end
+          end)
+        end)
+
+      {mutation_backend, _} = start_database_task(mutation)
+      assert_receive {:provider_mutated, mutation_pid}, 5_000
+
+      consumer =
+        database_task(fn ->
+          Repo.transaction(consume_multi(provider, tenant, handle, candidate))
+        end)
+
+      {consumer_backend, _} = start_database_task(consumer)
+      await_blocked(consumer_backend, mutation_backend)
+      send(mutation_pid, :commit)
+      assert {:ok, :ok} = Task.await(mutation)
+      assert {:error, :proof, ^reason, _} = Task.await(consumer)
+      send(verifier_pid, :release)
+      assert {:error, ^reason} = Task.await(verifier)
+      assert_no_connections(provider)
+    end
+  end
+
+  test "expired candidate cleanup serializes with consumption and leaves no proof" do
+    {provider, tenant, handle, candidate} = consume_fixture()
+    parent = self()
+
+    Sandbox.unboxed_run(Repo, fn ->
+      candidate
+      |> Ecto.Changeset.change(
+        expires_at: DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+      )
+      |> Repo.update!()
+    end)
+
+    cleanup =
+      database_task(fn ->
+        held_cleanup(&Tango.cleanup_expired_authorizations/0, parent)
+      end)
+
+    {cleanup_backend, _} = start_database_task(cleanup)
+    assert_receive {:cleanup_pending, cleanup_pid, audit_ids}, 5_000
+    cleanup_audits_on_exit(audit_ids)
+
+    consumer =
+      database_task(fn ->
+        Repo.transaction(consume_multi(provider, tenant, handle, candidate))
+      end)
+
+    {consumer_backend, _} = start_database_task(consumer)
+    await_blocked(consumer_backend, cleanup_backend)
+    send(cleanup_pid, :commit)
+    assert {:ok, {:ok, 1}} = Task.await(cleanup)
+    assert {:error, :proof, :invalid_completion, _} = Task.await(consumer)
+    Sandbox.unboxed_run(Repo, fn -> refute Repo.get(Authorization, candidate.id) end)
+    assert_no_connections(provider)
+  end
+
+  test "session cleanup waits for consumption before cascading candidate deletion" do
+    {provider, tenant, handle, candidate} = consume_fixture()
+    parent = self()
+
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.get!(OAuthSession, candidate.oauth_session_id)
+      |> Ecto.Changeset.change(
+        expires_at:
+          DateTime.utc_now() |> DateTime.add(-25 * 3600, :second) |> DateTime.truncate(:second)
+      )
+      |> Repo.update!()
+    end)
+
+    consumer =
+      database_task(fn -> held_consumption(provider, tenant, handle, candidate, parent) end)
+
+    {consumer_backend, _} = start_database_task(consumer)
+    assert_receive {:consumed_pending, consumer_pid}, 5_000
+    cleanup = database_task(fn -> held_cleanup(&Tango.cleanup_expired_sessions/0, parent) end)
+    {cleanup_backend, _} = start_database_task(cleanup)
+    await_blocked(cleanup_backend, consumer_backend)
+    send(consumer_pid, :commit)
+    assert {:ok, %{proof: _}} = Task.await(consumer)
+    assert_receive {:cleanup_pending, cleanup_pid, audit_ids}, 5_000
+    cleanup_audits_on_exit(audit_ids)
+    send(cleanup_pid, :commit)
+    assert {:ok, {:ok, 1}} = Task.await(cleanup)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      refute Repo.get(OAuthSession, candidate.oauth_session_id)
+      refute Repo.get(Authorization, candidate.id)
+    end)
+
+    assert_no_connections(provider)
+  end
+
+  defp held_cleanup(operation, parent) do
+    Repo.transaction(fn ->
+      before_ids = Repo.all(from(log in AuditLog, select: log.id))
+      result = operation.()
+      audit_ids = Repo.all(from(log in AuditLog, select: log.id)) -- before_ids
+      send(parent, {:cleanup_pending, self(), audit_ids})
+
+      receive do
+        :commit -> result
+      end
+    end)
+  end
+
+  defp cleanup_audits_on_exit(audit_ids) do
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.delete_all(from(log in AuditLog, where: log.id in ^audit_ids))
+      end)
+    end)
+  end
+
+  defp consume_fixture do
+    fixture =
+      Sandbox.unboxed_run(Repo, fn ->
+        provider = Factory.create_provider()
+        tenant = Factory.tenant_id("consume-race")
+        {handle, candidate} = initial_candidate(provider, tenant, "consume", :consume)
+        {provider, tenant, handle, candidate}
+      end)
+
+    {provider, _, _, _} = fixture
+    on_exit(fn -> cleanup_provider(provider.id) end)
+    fixture
+  end
+
+  defp database_task(operation) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+          send(parent, {:database_ready, self(), backend})
+
+          receive do
+            :go -> operation.()
+          end
+        end)
+      end)
+
+    on_exit(fn -> Process.exit(task.pid, :kill) end)
+    task
+  end
+
+  defp start_database_task(task) do
+    pid = task.pid
+    assert_receive {:database_ready, ^pid, backend}, 5_000
+    send(pid, :go)
+    {backend, pid}
+  end
+
+  defp held_consumption(provider, tenant, handle, candidate, parent) do
+    consume_multi(provider, tenant, handle, candidate)
+    |> Ecto.Multi.run(:host_write, fn repo, _changes ->
+      stored = repo.get!(Authorization, candidate.id)
+      assert stored.consumed_at
+      assert stored.access_token == nil
+      assert stored.refresh_token == nil
+      assert stored.provider_data == %{}
+      send(parent, {:consumed_pending, self()})
+
+      receive do
+        :commit -> {:ok, :committed}
+        :rollback -> {:error, :host_rejected}
+      end
+    end)
+    |> Repo.transaction()
+  end
+
+  defp consume_multi(provider, tenant, handle, candidate) do
+    Tango.Authorization.multi_consume_authorization(Ecto.Multi.new(), :proof, handle, tenant,
+      provider: provider.slug,
+      intent_reference: candidate.intent_reference,
+      required_scopes: ["records.read"]
+    )
+  end
+
+  defp assert_consumed(candidate) do
+    Sandbox.unboxed_run(Repo, fn ->
+      stored = Repo.get!(Authorization, candidate.id)
+      assert stored.consumed_at
+      assert stored.access_token == nil
+      assert stored.refresh_token == nil
+      assert stored.provider_data == %{}
+    end)
+  end
+
+  defp assert_no_connections(provider) do
+    Sandbox.unboxed_run(Repo, fn ->
+      refute Repo.exists?(from(c in Connection, where: c.provider_id == ^provider.id))
+    end)
+  end
+
+  defp initial_candidate(provider, tenant_id, suffix, mode \\ :connection) do
     intent = "intent-#{suffix}-#{System.unique_integer([:positive])}"
 
     {:ok, session} =
@@ -205,7 +589,8 @@ defmodule Tango.AuthorizationLockTest do
         scopes: ["records.read"],
         redirect_uri: "https://api.example.test/callback",
         completion_origin: "https://app.example.test",
-        intent_reference: intent
+        intent_reference: intent,
+        completion_mode: mode
       )
 
     handle = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
@@ -223,6 +608,8 @@ defmodule Tango.AuthorizationLockTest do
       oauth_client_id: session.oauth_client_id,
       intent_reference: intent,
       completion_origin: session.completion_origin,
+      completion_mode: mode,
+      provider_data: %{"workspace_id" => "synthetic-workspace"},
       account_subject: "subject-1",
       identity_claims: %{},
       verified_at: DateTime.utc_now(),

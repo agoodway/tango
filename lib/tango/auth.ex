@@ -88,7 +88,9 @@ defmodule Tango.Auth do
   end
 
   defp validate_session_options(_repo, _provider, _tenant_id, opts, :legacy) do
-    with {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts) do
+    with {:ok, validated_opts} <- Tango.Validation.validate_oauth_options(opts),
+         :ok <-
+           validate_completion_mode(Keyword.get(opts, :completion_mode, :connection), :legacy) do
       # Keep empty scopes unbound so authorize_url/2 can still supply them (0.1.x).
       scopes = validated_opts[:scopes] || []
       {:ok, Keyword.put(validated_opts, :scopes, scopes)}
@@ -96,6 +98,7 @@ defmodule Tango.Auth do
   end
 
   defp validate_session_options(repo, provider, tenant_id, opts, :authorization) do
+    completion_mode = Keyword.get(opts, :completion_mode, :connection)
     scopes = Keyword.get(opts, :scopes, provider.default_scopes)
     redirect_uri = Keyword.get(opts, :redirect_uri)
     completion_origin = Keyword.get(opts, :completion_origin)
@@ -103,14 +106,16 @@ defmodule Tango.Auth do
     expires_at = Keyword.get(opts, :expires_at)
     auth_params = Keyword.get(opts, :auth_params, %{})
 
-    with :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
+    with :ok <- validate_completion_mode(completion_mode, :authorization),
+         :ok <- Tango.Validation.validate_redirect_uri(redirect_uri),
          :ok <- Tango.Validation.validate_scopes(scopes),
          :ok <- Tango.Validation.validate_completion_origin(completion_origin),
          :ok <- validate_intent_reference(intent_reference),
          :ok <- validate_expiration(expires_at),
          {:ok, auth_params} <- Tango.Validation.validate_auth_params(auth_params),
          {:ok, expected} <-
-           validate_expected_connection(
+           validate_expected_binding(
+             completion_mode,
              repo,
              provider,
              tenant_id,
@@ -119,6 +124,7 @@ defmodule Tango.Auth do
            ) do
       {:ok,
        [
+         completion_mode: completion_mode,
          scopes: scopes,
          redirect_uri: redirect_uri,
          completion_origin: completion_origin,
@@ -130,6 +136,26 @@ defmodule Tango.Auth do
        ]}
     end
   end
+
+  defp validate_completion_mode(:connection, _flow), do: :ok
+  defp validate_completion_mode(:consume, :authorization), do: :ok
+  defp validate_completion_mode(_mode, _flow), do: {:error, :invalid_completion_mode}
+
+  defp validate_expected_binding(:consume, _repo, _provider, _tenant_id, nil, nil),
+    do: {:ok, %{id: nil, subject: nil}}
+
+  defp validate_expected_binding(:consume, _repo, _provider, _tenant_id, nil, subject)
+       when is_binary(subject) do
+    if String.trim(subject) == "",
+      do: {:error, :invalid_completion_options},
+      else: {:ok, %{id: nil, subject: subject}}
+  end
+
+  defp validate_expected_binding(:consume, _repo, _provider, _tenant_id, _id, _subject),
+    do: {:error, :invalid_completion_options}
+
+  defp validate_expected_binding(:connection, repo, provider, tenant_id, id, subject),
+    do: validate_expected_connection(repo, provider, tenant_id, id, subject)
 
   defp validate_intent_reference(reference)
        when is_binary(reference) and byte_size(reference) > 0 and byte_size(reference) <= 255,

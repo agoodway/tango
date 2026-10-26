@@ -17,6 +17,7 @@ defmodule Tango.Schemas.Authorization do
           token_type: String.t() | nil,
           token_expires_at: DateTime.t() | nil,
           granted_scopes: [String.t()],
+          completion_mode: :connection | :consume,
           expected_connection_id: integer() | nil,
           expected_subject: String.t() | nil,
           oauth_client_id: String.t() | nil,
@@ -47,6 +48,7 @@ defmodule Tango.Schemas.Authorization do
     :token_type,
     :token_expires_at,
     :granted_scopes,
+    :completion_mode,
     :expected_connection_id,
     :expected_subject,
     :oauth_client_id,
@@ -62,6 +64,7 @@ defmodule Tango.Schemas.Authorization do
   ]
 
   @required_fields [
+    :completion_mode,
     :provider_id,
     :oauth_session_id,
     :tenant_id,
@@ -82,6 +85,7 @@ defmodule Tango.Schemas.Authorization do
     field(:token_type, :string)
     field(:token_expires_at, :utc_datetime)
     field(:granted_scopes, {:array, :string}, default: [])
+    field(:completion_mode, Ecto.Enum, values: [:connection, :consume], default: :connection)
     field(:expected_connection_id, :integer)
     field(:expected_subject, :string)
     field(:oauth_client_id, :string)
@@ -116,6 +120,14 @@ defmodule Tango.Schemas.Authorization do
     |> foreign_key_constraint(:oauth_session_id)
     |> unique_constraint(:oauth_session_id)
     |> unique_constraint(:handle_hash)
+    |> check_constraint(:completion_mode,
+      name: :tango_authorizations_completion_mode_check,
+      message: "must be connection or consume"
+    )
+    |> check_constraint(:completion_mode,
+      name: :tango_authorizations_consume_connection_check,
+      message: "must not bind a connection in consume mode"
+    )
     |> check_constraint(:access_token,
       name: :tango_authorizations_unconsumed_access_token_check,
       message: "must be present until the authorization is consumed"

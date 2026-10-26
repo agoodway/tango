@@ -26,6 +26,27 @@ defmodule Tango.API.RouterTest do
   end
 
   describe "POST /sessions" do
+    test "browser completion options cannot select consume mode", %{provider: provider} do
+      response =
+        conn(:post, "/sessions", %{
+          "provider" => provider.slug,
+          "redirect_uri" => @redirect_uri,
+          "completion_mode" => "consume",
+          "expected_subject" => "browser-selected-subject"
+        })
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("x-tenant-id", "browser-mode-tenant")
+        |> put_req_header("authorization", "Bearer lets-dance-the-tango")
+        |> Router.call(Router.init([]))
+
+      assert response.status == 201
+      body = Jason.decode!(response.resp_body)
+      session = TestRepo.get_by!(Tango.Schemas.OAuthSession, session_token: body["session_token"])
+      assert session.completion_mode == :connection
+      assert session.expected_subject == nil
+      assert session.expected_connection_id == nil
+    end
+
     test "creates OAuth session with valid parameters", %{provider: provider} do
       conn =
         conn(:post, "/sessions", %{

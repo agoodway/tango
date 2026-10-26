@@ -469,6 +469,90 @@ defmodule Tango.AuthorizationCallbackTest do
   end
 
   describe "SQL telemetry and log parameters" do
+    test "consume callback verification proof and cleanup expose no synthetic secrets", ctx do
+      {:ok, provider} =
+        Tango.update_provider(ctx.provider, %{
+          metadata: %{"token_response_metadata" => ["workspace_id"]}
+        })
+
+      ctx = %{ctx | provider: provider}
+      session = authorization_session(ctx, "consume-redaction", completion_mode: :consume)
+      state = encoded_state(session)
+      expect_token(ctx.bypass, %{"workspace_id" => "synthetic-workspace-identity"})
+
+      {queries, log} =
+        with_log([level: :debug], fn ->
+          capture_queries(fn ->
+            response = callback(code: @code, state: state)
+            payload = extract_payload(response)
+            handle = Map.fetch!(payload, "completion_handle")
+
+            assert payload == %{
+                     "type" => "oauth_complete",
+                     "completion_handle" => handle,
+                     "intent_reference" => "consume-redaction"
+                   }
+
+            assert {:ok, summary} =
+                     Tango.verify_authorization(handle, ctx.tenant, {InitialVerifier, []},
+                       intent_reference: session.intent_reference,
+                       provider: provider.slug
+                     )
+
+            multi =
+              Tango.Authorization.multi_consume_authorization(
+                Ecto.Multi.new(),
+                :proof,
+                handle,
+                ctx.tenant,
+                intent_reference: session.intent_reference,
+                provider: provider.slug
+              )
+
+            assert {:ok, %{proof: proof}} = Repo.transaction(multi)
+
+            assert Enum.sort(Map.keys(proof)) ==
+                     Enum.sort([:provider, :subject, :claims, :granted_scopes, :intent_reference])
+
+            for public <- [response.resp_body, summary, proof],
+                sentinel <- [
+                  "candidate-access-secret",
+                  "candidate-refresh-secret",
+                  "synthetic-workspace-identity",
+                  @code
+                ] do
+              refute term_contains?(public, sentinel)
+            end
+
+            stored = Repo.get_by!(Authorization, oauth_session_id: session.id)
+            assert stored.consumed_at
+            assert stored.access_token == nil
+            assert stored.refresh_token == nil
+            assert stored.provider_data == %{}
+            assert {:ok, 1} = Tango.cleanup_expired_authorizations()
+            refute Repo.get(Authorization, stored.id)
+          end)
+        end)
+
+      assert_log_is_credential_free(log, state)
+      assert_queries_are_credential_free(queries)
+      refute Enum.any?(queries, &(&1.query =~ "tango_connections"))
+      audits = Repo.all(AuditLog)
+      refute audits == []
+
+      for audit <- audits,
+          sentinel <- [
+            "candidate-access-secret",
+            "candidate-refresh-secret",
+            "synthetic-workspace-identity",
+            @code
+          ] do
+        refute term_contains?(audit, sentinel)
+      end
+
+      assert Repo.aggregate(Connection, :count) == 0
+    end
+
     test "candidate staging never exposes plaintext tokens in query params", ctx do
       session = authorization_session(ctx)
       state = encoded_state(session)
@@ -705,6 +789,26 @@ defmodule Tango.AuthorizationCallbackTest do
   end
 
   describe "cleanup_expired_authorizations/0" do
+    test "wipes and removes expired consume candidates while preserving live consume candidates",
+         ctx do
+      expired = stage_candidate(ctx, "expired-consume", completion_mode: :consume)
+      live = stage_candidate(ctx, "live-consume", completion_mode: :consume)
+
+      expired
+      |> Ecto.Changeset.change(
+        expires_at: DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+      )
+      |> Repo.update!()
+
+      queries =
+        capture_queries(fn -> assert {:ok, 1} = Tango.cleanup_expired_authorizations() end)
+
+      assert_queries_are_credential_free(queries)
+      refute Repo.get(Authorization, expired.id)
+      assert Repo.get!(Authorization, live.id) == live
+      assert Repo.aggregate(Connection, :count) == 0
+    end
+
     test "deletes expired and consumed candidates and keeps live ones", ctx do
       live = stage_candidate(ctx, "live")
       expired = stage_candidate(ctx, "expired")
@@ -849,6 +953,7 @@ defmodule Tango.AuthorizationCallbackTest do
     refute queries == []
 
     sentinels = [
+      @code,
       "candidate-access-secret",
       "candidate-refresh-secret",
       "stale-access-token",
@@ -926,13 +1031,20 @@ defmodule Tango.AuthorizationCallbackTest do
     refute log =~ String.slice(state, 0, 20)
   end
 
-  defp authorization_session(ctx, intent \\ "intent-1") do
+  defp authorization_session(ctx, intent \\ "intent-1", opts \\ []) do
     {:ok, session} =
-      Tango.create_authorization_session(ctx.provider.slug, ctx.tenant,
-        scopes: ["records.read", "records.write"],
-        redirect_uri: @redirect_uri,
-        completion_origin: @origin,
-        intent_reference: intent
+      Tango.create_authorization_session(
+        ctx.provider.slug,
+        ctx.tenant,
+        Keyword.merge(
+          [
+            scopes: ["records.read", "records.write"],
+            redirect_uri: @redirect_uri,
+            completion_origin: @origin,
+            intent_reference: intent
+          ],
+          opts
+        )
       )
 
     session
@@ -952,8 +1064,8 @@ defmodule Tango.AuthorizationCallbackTest do
     url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
   end
 
-  defp stage_candidate(ctx, intent) do
-    session = authorization_session(ctx, intent)
+  defp stage_candidate(ctx, intent, opts \\ []) do
+    session = authorization_session(ctx, intent, opts)
     expect_token(ctx.bypass)
 
     {:ok, _completion} =
@@ -964,19 +1076,24 @@ defmodule Tango.AuthorizationCallbackTest do
     Repo.get_by!(Authorization, oauth_session_id: session.id)
   end
 
-  defp expect_token(bypass) do
+  defp expect_token(bypass, extra \\ %{}) do
     Bypass.expect_once(bypass, "POST", "/oauth/token", fn conn ->
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
       |> Plug.Conn.resp(
         200,
-        Jason.encode!(%{
-          "access_token" => "candidate-access-secret",
-          "refresh_token" => "candidate-refresh-secret",
-          "token_type" => "Bearer",
-          "expires_in" => 3600,
-          "scope" => "records.read records.write"
-        })
+        Jason.encode!(
+          Map.merge(
+            %{
+              "access_token" => "candidate-access-secret",
+              "refresh_token" => "candidate-refresh-secret",
+              "token_type" => "Bearer",
+              "expires_in" => 3600,
+              "scope" => "records.read records.write"
+            },
+            extra
+          )
+        )
       )
     end)
   end

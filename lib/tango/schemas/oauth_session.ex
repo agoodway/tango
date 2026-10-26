@@ -19,6 +19,7 @@ defmodule Tango.Schemas.OAuthSession do
           code_verifier: String.t() | nil,
           redirect_uri: String.t() | nil,
           scopes: [String.t()],
+          completion_mode: :connection | :consume,
           expected_connection_id: integer() | nil,
           expected_subject: String.t() | nil,
           completion_origin: String.t() | nil,
@@ -44,6 +45,7 @@ defmodule Tango.Schemas.OAuthSession do
     :code_verifier,
     :redirect_uri,
     :scopes,
+    :completion_mode,
     :expected_connection_id,
     :expected_subject,
     :completion_origin,
@@ -54,7 +56,14 @@ defmodule Tango.Schemas.OAuthSession do
     :expires_at,
     :metadata
   ]
-  @required_fields [:provider_id, :tenant_id, :session_token, :state, :expires_at]
+  @required_fields [
+    :provider_id,
+    :tenant_id,
+    :session_token,
+    :state,
+    :expires_at,
+    :completion_mode
+  ]
 
   schema "tango_oauth_sessions" do
     belongs_to(:provider, Tango.Schemas.Provider)
@@ -64,6 +73,7 @@ defmodule Tango.Schemas.OAuthSession do
     field(:code_verifier, :string)
     field(:redirect_uri, :string)
     field(:scopes, {:array, :string}, default: [])
+    field(:completion_mode, Ecto.Enum, values: [:connection, :consume], default: :connection)
     field(:expected_connection_id, :integer)
     field(:expected_subject, :string)
     field(:completion_origin, :string)
@@ -87,6 +97,14 @@ defmodule Tango.Schemas.OAuthSession do
     |> validate_length(:code_verifier, min: 43, max: 128)
     |> unique_constraint(:session_token)
     |> foreign_key_constraint(:provider_id)
+    |> check_constraint(:completion_mode,
+      name: :tango_oauth_sessions_completion_mode_check,
+      message: "must be connection or consume"
+    )
+    |> check_constraint(:completion_mode,
+      name: :tango_oauth_sessions_consume_connection_check,
+      message: "must not bind a connection in consume mode"
+    )
     |> validate_expires_at()
   end
 
@@ -107,6 +125,7 @@ defmodule Tango.Schemas.OAuthSession do
       code_verifier: code_verifier,
       redirect_uri: opts[:redirect_uri],
       scopes: opts[:scopes] || [],
+      completion_mode: Keyword.get(opts, :completion_mode, :connection),
       expected_connection_id: opts[:expected_connection_id],
       expected_subject: opts[:expected_subject],
       completion_origin: opts[:completion_origin],
