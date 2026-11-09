@@ -53,6 +53,32 @@ defmodule Tango.RefreshErrorTest do
       end
     end
 
+    test "maps an allowlisted code followed by a provider reason" do
+      cases = [
+        {"invalid_client: Invalid client_id or client_secret #{@sentinel}", :invalid_client},
+        {"invalid_grant #{@sentinel}", :invalid_grant},
+        {"  invalid_grant:#{@sentinel}", :invalid_grant},
+        {"invalid_scope\t#{@sentinel}", :invalid_scope}
+      ]
+
+      for {error, atom} <- cases,
+          body <- [%{"error" => error}, Jason.encode!(%{"error" => error})] do
+        reason = RefreshError.from_response(400, [], body)
+        assert reason == {:oauth_error, atom}
+        refute String.contains?(RefreshError.to_storage(reason), @sentinel)
+      end
+
+      for error <- [
+            "not_a_real_code: invalid_grant",
+            ": invalid_grant",
+            "invalid_grantx: #{@sentinel}",
+            "invalid-grant: #{@sentinel}",
+            "INVALID_GRANT"
+          ] do
+        assert RefreshError.from_response(400, [], %{"error" => error}) == {:http_error, 400}
+      end
+    end
+
     test "HTTP outage status wins over OAuth body" do
       body = %{"error" => "invalid_grant", "error_description" => @sentinel}
 

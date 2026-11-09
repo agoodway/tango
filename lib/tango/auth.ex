@@ -1052,22 +1052,32 @@ defmodule Tango.Auth do
   @doc """
   Classify OAuth error types.
   """
-  def classify_oauth_error("access_denied"), do: :oauth_denied
-  def classify_oauth_error(_), do: :oauth_provider_error
+  def classify_oauth_error(error) do
+    if map_oauth_error_code(error) == :access_denied,
+      do: :oauth_denied,
+      else: :oauth_provider_error
+  end
 
   @doc """
   Map OAuth error codes to atoms.
+
+  The leading token of the value is the code (see `Tango.OAuthErrorCode`), so
+  `"invalid_client: Invalid client_id"` maps to `:invalid_client`. Codes
+  outside the allowlist map to `:provider_error`.
   """
-  def map_oauth_error_code("access_denied"), do: :access_denied
-  def map_oauth_error_code("invalid_request"), do: :invalid_request
-  def map_oauth_error_code("invalid_client"), do: :invalid_client
-  def map_oauth_error_code("invalid_grant"), do: :invalid_grant
-  def map_oauth_error_code("unsupported_grant_type"), do: :unsupported_grant_type
-  def map_oauth_error_code("invalid_scope"), do: :invalid_scope
-  def map_oauth_error_code("server_error"), do: :server_error
-  def map_oauth_error_code("temporarily_unavailable"), do: :temporarily_unavailable
-  def map_oauth_error_code("unauthorized_client"), do: :unauthorized_client
-  def map_oauth_error_code(_), do: :provider_error
+  def map_oauth_error_code(error),
+    do: error |> Tango.OAuthErrorCode.leading_code() |> known_oauth_error_code()
+
+  defp known_oauth_error_code("access_denied"), do: :access_denied
+  defp known_oauth_error_code("invalid_request"), do: :invalid_request
+  defp known_oauth_error_code("invalid_client"), do: :invalid_client
+  defp known_oauth_error_code("invalid_grant"), do: :invalid_grant
+  defp known_oauth_error_code("unsupported_grant_type"), do: :unsupported_grant_type
+  defp known_oauth_error_code("invalid_scope"), do: :invalid_scope
+  defp known_oauth_error_code("server_error"), do: :server_error
+  defp known_oauth_error_code("temporarily_unavailable"), do: :temporarily_unavailable
+  defp known_oauth_error_code("unauthorized_client"), do: :unauthorized_client
+  defp known_oauth_error_code(_code), do: :provider_error
 
   @doc """
   Build HTTPS callback URL from connection.

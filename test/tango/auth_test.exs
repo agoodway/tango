@@ -137,6 +137,30 @@ defmodule Tango.AuthTest do
     end
   end
 
+  describe "map_oauth_error_code/1 with a provider reason" do
+    test "maps the leading code and ignores the reason" do
+      assert Tango.Auth.map_oauth_error_code("invalid_client: Invalid client_id or client_secret") ==
+               :invalid_client
+
+      assert Tango.Auth.map_oauth_error_code("access_denied The user denied access") ==
+               :access_denied
+
+      assert Tango.Auth.map_oauth_error_code("not_a_real_code: invalid_grant") == :provider_error
+      assert Tango.Auth.map_oauth_error_code(": invalid_grant") == :provider_error
+      assert Tango.Auth.map_oauth_error_code(nil) == :provider_error
+    end
+
+    test "classifies a denial with a reason as a denial" do
+      assert Tango.Auth.classify_oauth_error("access_denied") == :oauth_denied
+      assert Tango.Auth.classify_oauth_error("access_denied: The user cancelled") == :oauth_denied
+
+      assert Tango.Auth.classify_oauth_error("invalid_client: bad secret") ==
+               :oauth_provider_error
+
+      assert Tango.Auth.classify_oauth_error(nil) == :oauth_provider_error
+    end
+  end
+
   describe "OAuth2 client configuration" do
     test "build_oauth_client includes JSON serializer" do
       # This test ensures the OAuth2.Client is configured with Jason serializer

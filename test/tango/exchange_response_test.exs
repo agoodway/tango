@@ -33,6 +33,11 @@ defmodule Tango.ExchangeResponseTest do
     invalid_grant:
       {"400 invalid_grant", 400, "application/json",
        Jason.encode!(%{"error" => "invalid_grant", "error_description" => @sentinel}), []},
+    invalid_client_reason:
+      {"400 invalid_client with a reason", 400, "application/json",
+       Jason.encode!(%{
+         "error" => "invalid_client: Invalid client_id or client_secret #{@sentinel}"
+       }), []},
     server_html: {"500 JSON content type with HTML", 500, "application/json", @html, []}
   }
 
@@ -51,6 +56,8 @@ defmodule Tango.ExchangeResponseTest do
      {:oauth_error, :provider_error}},
     {:invalid_grant, {:response, 400, :map}, {:oauth_error, :invalid_grant},
      {:oauth_error, :invalid_grant}},
+    {:invalid_client_reason, {:response, 400, :map}, {:oauth_error, :invalid_client},
+     {:oauth_error, :invalid_client}},
     {:server_html, {:response, 500, :binary}, {:oauth_error, :provider_error},
      {:oauth_error, :provider_error}}
   ]

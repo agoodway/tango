@@ -63,7 +63,9 @@ defmodule Tango.RefreshError do
   `headers` is a tuple list. The first `retry-after` value is kept only when
   the whole value is a non-negative decimal integer. A 429, 408, or 5xx status
   ignores the body. Other 4xx failures use an allowlisted `"error"` code when the
-  body is a map or a JSON object; everything else stays `{:http_error, status}`.
+  body is a map or a JSON object; the code is the leading token of the value, so
+  a reason the provider appends is ignored (see `Tango.OAuthErrorCode`).
+  Everything else stays `{:http_error, status}`.
   """
   @spec from_response(integer(), [{String.t(), String.t()}], term()) :: reason()
   def from_response(status, headers, _body) when is_integer(status) and status == 429 do
@@ -187,7 +189,8 @@ defmodule Tango.RefreshError do
     end
   end
 
-  defp oauth_code(%{"error" => code}) when is_binary(code), do: Map.fetch(@oauth_codes, code)
+  defp oauth_code(%{"error" => code}) when is_binary(code),
+    do: Map.fetch(@oauth_codes, Tango.OAuthErrorCode.leading_code(code))
 
   defp oauth_code(_body), do: :error
 end
