@@ -31,7 +31,7 @@ Add `tango` to your dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:tango, "~> 0.4.2"}
+    {:tango, "~> 0.4.3"}
   ]
 end
 ```
